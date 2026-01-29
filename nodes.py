@@ -1,7 +1,13 @@
 # Responsible for housing the individual functions (nodes) that perform specific tasks like scraping and analysis.
+import json
 import requests
+from langchain_openai import ChatOpenAI
+
 from state import GraphState
 from utils.parser import parse_valor_1000_json
+from utils.tools import get_search_query, search_company_web_presence
+
+enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 def ranking_scraper_node(state: GraphState):
     """
@@ -43,4 +49,122 @@ def ranking_scraper_node(state: GraphState):
     except Exception as e:
         return {"execution_logs": [f"Error during pulling data: {str(e)}"]}
 
-# Future nodes like 'enrichment_node' or 'graph_saver_node' will be added here.
+
+
+def enrichment_node(state: GraphState):
+    """
+    Enrich company record with automated discovery.
+    """
+
+    print("--- NODE: Enrichment ---")
+    source_companies = state.get("companies", [])
+    enriched_companies = []
+    processed_count = 0
+
+    for index, company in enumerate(source_companies):
+        if index >= 5:
+            # Expand to full set later so batching keeps throughput safe
+            enriched_companies.append(company)
+            continue
+
+        company_copy = dict(company)
+        company_name = company_copy.get("nome_empresa", "").strip()
+        city = company_copy.get("sede", "").strip()
+
+        if not company_name:
+            # Skip entry because missing name blocks precise search
+            enriched_companies.append(company_copy)
+            continue
+
+        official_query = get_search_query(company_name, city, "official")
+        official_results = search_company_web_presence(official_query)
+
+        cnpj_query = get_search_query(company_name, city, "cnpj")
+        cnpj_results = search_company_web_presence(cnpj_query)
+
+        evidence_lines = [
+            f"Company: {company_name}",
+            f"City: {city or 'Unknown'}",
+            "Official search results:",
+        ]
+
+        if official_results:
+            for rank, item in enumerate(official_results, start=1):
+                evidence_lines.append(
+                    f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
+                )
+        else:
+            evidence_lines.append("No official search evidence found.")
+
+        evidence_lines.append("CNPJ search results:")
+
+        if cnpj_results:
+            for rank, item in enumerate(cnpj_results, start=1):
+                evidence_lines.append(
+                    f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
+                )
+        else:
+            evidence_lines.append("No CNPJ search evidence found.")
+
+        llm_prompt = "\n".join(evidence_lines)
+        system_directive = (
+            "You are a corporate intelligence analyst. "
+            "Pick the most credible official website URL and primary Brazilian CNPJ based on evidence. "
+            "If evidence is inconclusive, return null for that field. "
+            "Identify any corporate group relationship or notable brand connection and include a short note. "
+            "Return JSON with keys: official_website (string or null), primary_cnpj (string or null), "
+            "corporate_group_notes (string or null), found_brands (array of string)."
+        )
+
+        # Use LLM decision because snippet context prioritizes official domain over SEO noise
+        try:
+            llm_response = enrichment_llm.invoke(
+                [
+                    {"role": "system", "content": system_directive},
+                    {"role": "user", "content": llm_prompt},
+                ]
+            )
+            analysis_text = getattr(llm_response, "content", str(llm_response))
+            parsed_output = json.loads(analysis_text)
+        except Exception:
+            parsed_output = {}
+
+        official_website = parsed_output.get("official_website")
+        if isinstance(official_website, str) and official_website.strip():
+            company_copy["official_website"] = official_website.strip()
+        else:
+            # Default to None so downstream stage treats signal as uncertain
+            company_copy["official_website"] = None
+
+        primary_cnpj = parsed_output.get("primary_cnpj")
+        if isinstance(primary_cnpj, str) and primary_cnpj.strip():
+            company_copy["primary_cnpj"] = primary_cnpj.strip()
+        else:
+            company_copy["primary_cnpj"] = None
+
+        corporate_notes = parsed_output.get("corporate_group_notes")
+        if isinstance(corporate_notes, str) and corporate_notes.strip():
+            company_copy["corporate_group_notes"] = corporate_notes.strip()
+        else:
+            company_copy["corporate_group_notes"] = None
+
+        found_brands = parsed_output.get("found_brands")
+        if isinstance(found_brands, list):
+            company_copy["found_brands"] = [
+                str(brand).strip() for brand in found_brands if str(brand).strip()
+            ]
+        else:
+            # Keep empty list so later collector can append safely
+            company_copy["found_brands"] = company_copy.get("found_brands") or []
+
+        enriched_companies.append(company_copy)
+        processed_count += 1
+
+    log_message = (
+        f"Enrichment node processed {processed_count} companies with LLM-guided selection."
+    )
+
+    return {
+        "companies": enriched_companies,
+        "execution_logs": [log_message],
+    }
