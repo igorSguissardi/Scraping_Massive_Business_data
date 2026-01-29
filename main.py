@@ -1,10 +1,10 @@
 # Entry point for the application that triggers the graph execution with the required initial parameters.
 from graph import app
 
-def main():
+def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge
     initial_input = {
-        "initial_url": "https://infograficos.valor.globo.com/valor1000/rankings/ranking-das-1000-maiores/2025",
+        "initial_url": "https://infovalorbucket.s3.amazonaws.com/arquivos/valor-1000/2025/ranking-das-1000-maiores/RankingValor10002025.json?0.39000846525186394",
         "companies": [],
         "execution_logs": []
     }
