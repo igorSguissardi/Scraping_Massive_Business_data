@@ -3,28 +3,34 @@ import re
 
 def parse_valor_1000_json(json_data: dict):
     """
-    Takes raw HTML and returns a list of company dictionaries.
-    Verbal flexion: Imperative.
+    Return list of company dictionaries parsed from Valor 1000 JSON payload.
     """
 
     companies = []
-    
-    # Logic to find the table or list in the Valor 1000 page
-    # Note: You'll need to inspect the site     to get the exact class names
-    # The 'data' key contains the list of company strings found in your screenshot
-    rows = json_data.get("data") or json_data.get("aaData") or []
-    
-    for row in rows:
-        # Ensure row is a list before splitting; some APIs return lists of lists directly
-        if isinstance(row, str):
-            parts = row.split(";")
-        else:
-            parts = row # Already a list
+    rows_source = json_data.get("data") or json_data.get("aaData") or []
 
-        if len(parts) < 6: continue # Skip malformed rows
-        # 2. Clean HTML tags (like <i class="tooltipster">...</i>)
-        # Regex explanation: <[^>]*> matches anything between brackets
-        clean_name = re.sub(r'<[^>]*>', '', parts[2]).strip()
+    row_iterable = rows_source.values() if isinstance(rows_source, dict) else rows_source
+
+    for raw_row in row_iterable:
+        if isinstance(raw_row, list):
+            # Flatten single-element list because the export wraps each row string
+            row_content = raw_row[0] if len(raw_row) == 1 and isinstance(raw_row[0], str) else raw_row
+        else:
+            row_content = raw_row
+
+        if isinstance(row_content, str):
+            normalized_row = row_content.replace("\ufeff", "").strip()
+            parts = [part.strip() for part in normalized_row.split(";")]
+        elif isinstance(row_content, list):
+            # Preserve supplied column split if the upstream API already parsed it
+            parts = [str(part).strip() for part in row_content]
+        else:
+            continue
+
+        if len(parts) < 8:
+            continue
+
+        clean_name = re.sub(r"<[^>]*>", "", parts[2]).strip()
         company = {
             "classificacao_2024": parts[0],
             "classificacao_2023": parts[1],
