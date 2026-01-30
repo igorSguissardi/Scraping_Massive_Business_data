@@ -75,6 +75,7 @@ def enrichment_node(state: GraphState):
     enriched_companies = []
     processed_count = 0
     enrichment_logs = []
+    llm_request_count = 0  # Track number of LLM API calls
 
     for index, company in enumerate(source_companies):
         if index >= 5:
@@ -143,6 +144,8 @@ def enrichment_node(state: GraphState):
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
         try:
             enrichment_llm = get_enrichment_llm()
+            llm_request_count += 1  # Increment counter
+            print(f"  └─ [LLM REQUEST #{llm_request_count}] Sending enrichment prompt...")
             llm_response = enrichment_llm.invoke(
                 [
                     {"role": "system", "content": system_directive},
@@ -227,8 +230,9 @@ def enrichment_node(state: GraphState):
     log_message = (
         f"Enrichment node processed {processed_count} companies with LLM-guided selection."
     )
+    llm_summary = f"Total LLM API requests: {llm_request_count}"
 
     return {
         "companies": enriched_companies,
-        "execution_logs": [log_message] + enrichment_logs,
+        "execution_logs": [log_message, llm_summary] + enrichment_logs,
     }
