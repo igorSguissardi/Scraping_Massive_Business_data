@@ -67,12 +67,14 @@ def ranking_scraper_node(state: GraphState):
 def enrichment_node(state: GraphState):
     """
     Enrich company record with automated discovery.
+    Log all search queries and results for transparency and debugging.
     """
 
     print("--- NODE: Enrichment ---")
     source_companies = state.get("companies", [])
     enriched_companies = []
     processed_count = 0
+    enrichment_logs = []
 
     for index, company in enumerate(source_companies):
         if index >= 5:
@@ -87,13 +89,22 @@ def enrichment_node(state: GraphState):
         if not company_name:
             # Skip entry because missing name blocks precise search
             enriched_companies.append(company_copy)
+            enrichment_logs.append(f"[SKIPPED] Company #{index+1}: Missing nome_empresa")
             continue
+
+        # Log company being processed
+        print(f"\n[SEARCH #{index+1}] {company_name} ({city})")
+        enrichment_logs.append(f"Processing company #{index+1}: {company_name} | sede: {city} | setor: {company_copy.get('setor', 'N/A')}")
 
         official_query = get_search_query(company_name, city, "official")
         official_results = search_company_web_presence(official_query)
+        print(f"  └─ Official Query: '{official_query}'")
+        print(f"     Results: {len(official_results)} found")
 
         cnpj_query = get_search_query(company_name, city, "cnpj")
         cnpj_results = search_company_web_presence(cnpj_query)
+        print(f"  └─ CNPJ Query: '{cnpj_query}'")
+        print(f"     Results: {len(cnpj_results)} found")
 
         evidence_lines = [
             f"Company: {company_name}",
@@ -139,26 +150,62 @@ def enrichment_node(state: GraphState):
                 ]
             )
             analysis_text = getattr(llm_response, "content", str(llm_response))
+            # Validate that we received a non-empty response
+            if not analysis_text or not analysis_text.strip():
+                raise ValueError("LLM returned empty response")
+            
+            # Extract JSON from markdown code blocks if present
+            if "```json" in analysis_text:
+                # Extract content between ```json and ```
+                json_start = analysis_text.find("```json") + 7
+                json_end = analysis_text.find("```", json_start)
+                if json_end != -1:
+                    analysis_text = analysis_text[json_start:json_end].strip()
+            elif "```" in analysis_text:
+                # Extract content between ``` and ```
+                json_start = analysis_text.find("```") + 3
+                json_end = analysis_text.find("```", json_start)
+                if json_end != -1:
+                    analysis_text = analysis_text[json_start:json_end].strip()
+            
             parsed_output = json.loads(analysis_text)
-        except Exception:
+            print(f"  └─ LLM Analysis: Success")
+        except json.JSONDecodeError as e:
+            print(f"  └─ LLM Analysis: JSON Parse Error - {str(e)}")
+            print(f"     Raw response: {analysis_text[:200]}")
             parsed_output = {}
+            enrichment_logs.append(f"   JSON Error for {company_name}: Invalid JSON format")
+        except Exception as e:
+            print(f"  └─ LLM Analysis: Failed ({str(e)})")
+            parsed_output = {}
+            enrichment_logs.append(f"   LLM Error for {company_name}: {str(e)}")
 
         official_website = parsed_output.get("official_website")
         if isinstance(official_website, str) and official_website.strip():
             company_copy["official_website"] = official_website.strip()
+            print(f"     ✓ Website: {official_website.strip()}")
+            enrichment_logs.append(f"   ✓ official_website: {official_website.strip()}")
         else:
             # Default to None so downstream stage treats signal as uncertain
             company_copy["official_website"] = None
+            print(f"     ✗ Website: Not found")
+            enrichment_logs.append(f"   ✗ official_website: Not determined")
 
         primary_cnpj = parsed_output.get("primary_cnpj")
         if isinstance(primary_cnpj, str) and primary_cnpj.strip():
             company_copy["primary_cnpj"] = primary_cnpj.strip()
+            print(f"     ✓ CNPJ: {primary_cnpj.strip()}")
+            enrichment_logs.append(f"   ✓ primary_cnpj: {primary_cnpj.strip()}")
         else:
             company_copy["primary_cnpj"] = None
+            print(f"     ✗ CNPJ: Not found")
+            enrichment_logs.append(f"   ✗ primary_cnpj: Not determined")
 
         corporate_notes = parsed_output.get("corporate_group_notes")
         if isinstance(corporate_notes, str) and corporate_notes.strip():
             company_copy["corporate_group_notes"] = corporate_notes.strip()
+            print(f"     ℹ Corporate: {corporate_notes.strip()}")
+            enrichment_logs.append(f"   ℹ corporate_group_notes: {corporate_notes.strip()}")
         else:
             company_copy["corporate_group_notes"] = None
 
@@ -167,6 +214,9 @@ def enrichment_node(state: GraphState):
             company_copy["found_brands"] = [
                 str(brand).strip() for brand in found_brands if str(brand).strip()
             ]
+            if company_copy["found_brands"]:
+                print(f"     ◆ Brands: {', '.join(company_copy['found_brands'])}")
+                enrichment_logs.append(f"   ◆ found_brands: {company_copy['found_brands']}")
         else:
             # Keep empty list so later collector can append safely
             company_copy["found_brands"] = company_copy.get("found_brands") or []
@@ -180,5 +230,5 @@ def enrichment_node(state: GraphState):
 
     return {
         "companies": enriched_companies,
-        "execution_logs": [log_message],
+        "execution_logs": [log_message] + enrichment_logs,
     }

@@ -21,9 +21,32 @@ def main():
     # Display the result of the intelligence process
     print("\n--- Final Process Logs ---")
     for log in final_state["execution_logs"]:
-        print(f"Log: {log}")
+        print(f"  {log}")
     
-    print(f"\nCompanies discovered: {len(final_state['companies'])}")
+    # Show enriched companies details
+    enriched_companies = [c for c in final_state["companies"] if c.get("official_website") or c.get("primary_cnpj")]
+    
+    if enriched_companies:
+        print("\n--- Enriched Companies Summary ---")
+        for company in enriched_companies:
+            nome = company.get("nome_empresa", "N/A")
+            sede = company.get("sede", "N/A")
+            website = company.get("official_website", "❌ Not found")
+            cnpj = company.get("primary_cnpj", "❌ Not found")
+            corporate = company.get("corporate_group_notes", "No info")
+            brands = company.get("found_brands", [])
+            
+            print(f"\n  📊 {nome} | {sede}")
+            print(f"     🌐 Website: {website}")
+            print(f"     📋 CNPJ: {cnpj}")
+            if corporate:
+                print(f"     🏢 Corporate Info: {corporate}")
+            if brands:
+                print(f"     🏷️  Brands: {', '.join(brands)}")
+    
+    print(f"\n✅ Total companies in database: {len(final_state['companies'])}")
+    print(f"✅ Enriched companies: {len(enriched_companies)}")
+    print(f"✅ Pending enrichment: {len(final_state['companies']) - len(enriched_companies)}")
 
 if __name__ == "__main__":
     main()
