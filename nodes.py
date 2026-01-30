@@ -7,7 +7,20 @@ from state import GraphState
 from utils.parser import parse_valor_1000_json
 from utils.tools import get_search_query, search_company_web_presence
 
-enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+# Lazy-load LLM on first use to avoid initialization errors when API key is not set
+_enrichment_llm = None
+
+def get_enrichment_llm():
+    """
+    Instantiate the LLM only when first needed, avoiding import-time API key errors.
+    Reuse the same instance across invocations for efficiency.
+    """
+    global _enrichment_llm
+    if _enrichment_llm is None:
+        _enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    return _enrichment_llm
+
+
 
 def ranking_scraper_node(state: GraphState):
     """
@@ -118,6 +131,7 @@ def enrichment_node(state: GraphState):
 
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
         try:
+            enrichment_llm = get_enrichment_llm()
             llm_response = enrichment_llm.invoke(
                 [
                     {"role": "system", "content": system_directive},

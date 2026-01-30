@@ -1,5 +1,9 @@
 # Entry point for the application that triggers the graph execution with the required initial parameters.
+from dotenv import load_dotenv
 from graph import app
+
+# Load environment variables from .env file at application startup
+load_dotenv()
 
 def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge

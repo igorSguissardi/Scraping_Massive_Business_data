@@ -4,7 +4,7 @@ import random
 import time
 from typing import Dict, List
 
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 
 def get_search_query(nome_empresa: str, sede: str, search_type: str) -> str:
