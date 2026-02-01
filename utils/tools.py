@@ -1,9 +1,12 @@
 """Utility helpers for search-driven enrichment."""
 
+import asyncio
 import random
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 
+import requests
+from bs4 import BeautifulSoup
 from ddgs import DDGS
 
 
@@ -57,3 +60,71 @@ def search_company_web_presence(query: str, max_results: int = 4) -> List[Dict[s
     except Exception:
         # Catch exception to keep pipeline alive
         return []
+
+
+async def fetch_corporate_structure(cnpj: str) -> Optional[str]:
+    """
+    Fetch corporate structure (QSA/Sócio/Acionistas) from cnpj.biz.
+    
+    Args:
+        cnpj: Brazilian CNPJ number (with or without formatting)
+        
+    Returns:
+        Extracted text content of societary structure tables, or None if fetch fails.
+        Returns text content only to minimize token usage.
+    """
+    # Clean CNPJ: remove common formatting characters
+    clean_cnpj = cnpj.replace(".", "").replace("/", "").replace("-", "").strip()
+    
+    if not clean_cnpj or len(clean_cnpj) != 14:
+        return None
+    
+    url = f"https://cnpj.biz/{clean_cnpj}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+    }
+    
+    try:
+        # Add timeout and retry logic for robustness
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Parse HTML and find tables containing target keywords
+        soup = BeautifulSoup(response.content, "html.parser")
+        
+        # Keywords to search for in table headers or container text
+        target_keywords = ["Sócio", "Acionistas", "QSA", "Sócio-Gerente", "diretor", "presidente"]
+        
+        extracted_texts = []
+        
+        # Search for tables
+        for table in soup.find_all("table"):
+            table_text = table.get_text(strip=True)
+            # Check if any target keyword is in the table
+            if any(keyword in table_text for keyword in target_keywords):
+                extracted_texts.append(table_text)
+        
+        # Search for divs with specific classes or data attributes
+        for div in soup.find_all("div"):
+            div_text = div.get_text(strip=True)
+            if any(keyword in div_text for keyword in target_keywords):
+                # Limit to avoid overly large extractions
+                if len(div_text) < 5000:
+                    extracted_texts.append(div_text)
+        
+        # Return consolidated text
+        if extracted_texts:
+            # Deduplicate and join, limiting total length for token efficiency
+            unique_texts = list(dict.fromkeys(extracted_texts))
+            consolidated = "\n\n".join(unique_texts)
+            return consolidated[:3000] if len(consolidated) > 3000 else consolidated
+        
+        return None
+        
+    except requests.Timeout:
+        return None
+    except requests.ConnectionError:
+        return None
+    except Exception:
+        # Gracefully handle any parsing or request errors
+        return None

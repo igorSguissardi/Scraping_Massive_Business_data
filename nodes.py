@@ -1,4 +1,5 @@
 # Responsible for housing the individual functions (nodes) that perform specific tasks like scraping and analysis.
+import asyncio
 import json
 import os
 import requests
@@ -6,7 +7,7 @@ from langchain_openai import ChatOpenAI
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
-from utils.tools import get_search_query, search_company_web_presence
+from utils.tools import get_search_query, search_company_web_presence, fetch_corporate_structure
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
@@ -172,7 +173,6 @@ def enrichment_node(state: GraphState):
                 )
         else:
             evidence_lines.append("No address search evidence found.")
-
         
         llm_prompt = "\n".join(evidence_lines)
         system_directive = (
@@ -299,6 +299,138 @@ def enrichment_node(state: GraphState):
             company_copy["radical_cnpj"] = None
             print(f"     ✗ radical_cnpj: Not found")
             enrichment_logs.append(f"   ✗ radical_cnpj: Not determined")
+
+        # ===== CHECK IF COMPANY QUALIFIES FOR DEEP SEARCH (After Phase 1 extraction) =====
+        # Criteria: High-value sectors (Holding, Petróleo, Finanças) or Revenue > 5000 million R$
+        high_priority_keywords = ["Holding", "Petróleo", "Finanças"]
+        sector = company_copy.get("setor", "").strip()
+        revenue_str = company_copy.get("receita_liquida_milhoes", "0").strip()
+        
+        qualifies_for_deep_search = False
+        try:
+            # Parse Brazilian number format: 5.006,4 → 5006.4
+            # (period = thousands separator, comma = decimal separator)
+            revenue_float = float(revenue_str.replace(".", "").replace(",", ".")) if revenue_str else 0
+            # Check if any high-priority keyword is in the sector (substring match)
+            sector_match = any(keyword.lower() in sector.lower() for keyword in high_priority_keywords)
+            qualifies_for_deep_search = (
+                sector_match or revenue_float > 5000
+            )
+        except (ValueError, TypeError):
+            sector_match = any(keyword.lower() in sector.lower() for keyword in high_priority_keywords)
+            qualifies_for_deep_search = sector_match
+        
+        # ===== FETCH CORPORATE STRUCTURE IF QUALIFIED =====
+        deep_search_content = None
+        if qualifies_for_deep_search and company_copy.get("primary_cnpj"):
+            primary_cnpj = company_copy.get("primary_cnpj")
+            try:
+                deep_search_content = asyncio.run(fetch_corporate_structure(primary_cnpj))
+                if deep_search_content:
+                    print(f"  └─ [DEEP SEARCH] Retrieved {len(deep_search_content)} chars of corporate structure")
+                    enrichment_logs.append(f"   Deep search: Retrieved corporate structure ({len(deep_search_content)} chars)")
+            except Exception as e:
+                enrichment_logs.append(f"   Deep search failed: {str(e)}")
+            print(f"  └─ [PHASE 2] Analyzing deep search data for Neo4j fields...")
+            
+            system_directive_phase2 = (
+                "You are a corporate structure analyst specializing in Brazilian company ownership hierarchies. "
+                "Your task is to analyze societary structure data (QSA tables, shareholders, directors) from cnpj.biz "
+                "and extract information about corporate groups and subsidiary brands.\n\n"
+                
+                "DATA ACCESS:\n"
+                "You have raw HTML tables and text containing:\n"
+                "- QSA (Quadro de Sócio-Administrador): Lists all owners and administrators\n"
+                "- Shareholders information: Shows equity distribution\n"
+                "- Director/President names: Key decision makers\n\n"
+                
+                "EXTRACTION INSTRUCTIONS:\n"
+                "1. corporate_group_notes (string): If this company is part of a larger holding or conglomerate, "
+                "summarize the ownership structure in clear format. Examples:\n"
+                "   - 'Owned by [Holding Name] via [Parent Company]'\n"
+                "   - 'Part of [Conglomerate] industrial group'\n"
+                "   - 'Subsidiary of [Parent Corp] (stake: X%)'\n"
+                "   If the company is independent or no group structure is evident, return null.\n\n"
+                "2. found_brands (array of strings): If the societary tables mention subsidiary companies, brands, "
+                "or operating entities under this corporation, list them. Extract brand names and company names mentioned. "
+                "Return as JSON array ['Brand1', 'Brand2', 'Subsidiary3']. If no subsidiaries/brands found, return empty array [].\n\n"
+                
+                "OUTPUT FORMAT:\n"
+                "Return strictly a single JSON object with exactly these keys:\n"
+                "{\n"
+                "  \"corporate_group_notes\": \"string or null\",\n"
+                "  \"found_brands\": [\"array\", \"of\", \"strings\"]\n"
+                "}\n\n"
+                
+                "RULES:\n"
+                "- Extract only what is explicitly stated in the data. Do not infer or hallucinate relationships.\n"
+                "- If ownership structure is unclear or ambiguous, return null for corporate_group_notes.\n"
+                "- For found_brands, only include explicitly mentioned entities, not speculative ones.\n"
+                "- Keep corporate_group_notes concise (max 150 characters).\n"
+                "- found_brands array should contain 0-10 items typically."
+            )
+            
+            try:
+                enrichment_llm = get_enrichment_llm()
+                llm_request_count += 1  # Increment counter
+                print(f"  └─ [LLM REQUEST #{llm_request_count}] Sending deep search analysis prompt...")
+                llm_response_phase2 = enrichment_llm.invoke(
+                    [
+                        {"role": "system", "content": system_directive_phase2},
+                        {"role": "user", "content": deep_search_content},
+                    ]
+                )
+                analysis_text_phase2 = getattr(llm_response_phase2, "content", str(llm_response_phase2))
+                
+                if not analysis_text_phase2 or not analysis_text_phase2.strip():
+                    raise ValueError("LLM returned empty response for deep search analysis")
+                
+                # Extract JSON from markdown code blocks if present
+                if "```json" in analysis_text_phase2:
+                    json_start = analysis_text_phase2.find("```json") + 7
+                    json_end = analysis_text_phase2.find("```", json_start)
+                    if json_end != -1:
+                        analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
+                elif "```" in analysis_text_phase2:
+                    json_start = analysis_text_phase2.find("```") + 3
+                    json_end = analysis_text_phase2.find("```", json_start)
+                    if json_end != -1:
+                        analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
+                
+                parsed_output_phase2 = json.loads(analysis_text_phase2)
+                print(f"  └─ Phase 2 Analysis: Success")
+            except json.JSONDecodeError as e:
+                print(f"  └─ Phase 2 Analysis: JSON Parse Error - {str(e)}")
+                parsed_output_phase2 = {}
+                enrichment_logs.append(f"   Phase 2 JSON Error for {company_name}: Invalid JSON format")
+            except Exception as e:
+                print(f"  └─ Phase 2 Analysis: Failed ({str(e)})")
+                parsed_output_phase2 = {}
+                enrichment_logs.append(f"   Phase 2 LLM Error for {company_name}: {str(e)}")
+            
+            # Extract corporate_group_notes from Phase 2
+            corporate_group_notes = parsed_output_phase2.get("corporate_group_notes")
+            if isinstance(corporate_group_notes, str) and corporate_group_notes.strip():
+                company_copy["corporate_group_notes"] = corporate_group_notes.strip()
+                print(f"     ✓ corporate_group_notes: {corporate_group_notes.strip()[:60]}...")
+                enrichment_logs.append(f"   ✓ corporate_group_notes: {corporate_group_notes.strip()[:60]}...")
+            else:
+                company_copy["corporate_group_notes"] = None
+            
+            # Extract found_brands from Phase 2
+            found_brands = parsed_output_phase2.get("found_brands", [])
+            if isinstance(found_brands, list):
+                found_brands = [str(b).strip() for b in found_brands if isinstance(b, (str, int)) and str(b).strip()]
+                company_copy["found_brands"] = found_brands
+                if found_brands:
+                    print(f"     ✓ found_brands: {', '.join(found_brands)}")
+                    enrichment_logs.append(f"   ✓ found_brands: {', '.join(found_brands)}")
+            else:
+                company_copy["found_brands"] = []
+        else:
+            # No deep search: set Neo4j fields to null/empty
+            company_copy["corporate_group_notes"] = None
+            company_copy["found_brands"] = []
 
         enriched_companies.append(company_copy)
         processed_count += 1

@@ -32,3 +32,5 @@ class GraphState(TypedDict):
     companies: Annotated[List[CompanyRecord], operator.add]
     # Apply annotated aggregator so audit trail remains cumulative
     execution_logs: Annotated[List[str], operator.add]
+    # Track LLM API calls for cost auditing and rate limit management
+    llm_request_count: int
