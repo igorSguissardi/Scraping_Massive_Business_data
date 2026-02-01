@@ -23,7 +23,8 @@ def get_search_query(nome_empresa: str, sede: str, search_type: str) -> str:
     elif normalized_type == "address": 
         query = f"{nome_empresa} {sede} endereço físico sede"
     else:
-        print("nada a ser pesquisado")
+        # Fallback: raise error or return empty string to prevent UnboundLocalError
+        raise ValueError(f"Unknown search_type: '{search_type}'. Must be one of: linkedin, cnpj, site, official, address")
 
     return query.strip()
 

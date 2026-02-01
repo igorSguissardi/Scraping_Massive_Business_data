@@ -1,9 +1,23 @@
 # Entry point for the application that triggers the graph execution with the required initial parameters.
+import os
 from dotenv import load_dotenv
-from graph import app
 
-# Load environment variables from .env file at application startup
-load_dotenv()
+# Load environment variables BEFORE importing anything else that needs them
+# Explicitly specify the .env file path
+env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+print(f"[DEBUG] Loading .env from: {env_path}")
+print(f"[DEBUG] File exists: {os.path.exists(env_path)}")
+
+load_dotenv(dotenv_path=env_path, override=True, verbose=True)
+
+# Verify API key is loaded
+api_key = os.getenv("OPENAI_API_KEY")
+if api_key:
+    print(f"[DEBUG] ✓ OPENAI_API_KEY loaded successfully (length: {len(api_key)})")
+else:
+    print("[DEBUG] ✗ OPENAI_API_KEY not found after load_dotenv()")
+
+from graph import app
 
 def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge

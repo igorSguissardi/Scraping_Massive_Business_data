@@ -1,5 +1,6 @@
 # Responsible for housing the individual functions (nodes) that perform specific tasks like scraping and analysis.
 import json
+import os
 import requests
 from langchain_openai import ChatOpenAI
 
@@ -17,7 +18,16 @@ def get_enrichment_llm():
     """
     global _enrichment_llm
     if _enrichment_llm is None:
-        _enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Explicitly read the API key from environment
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise ValueError(
+                "OPENAI_API_KEY environment variable is not set. "
+                "Please ensure the .env file exists and contains: OPENAI_API_KEY=your_key"
+            )
+        
+        # Pass API key explicitly to ChatOpenAI
+        _enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
     return _enrichment_llm
 
 
@@ -97,7 +107,7 @@ def enrichment_node(state: GraphState):
         print(f"\n[SEARCH #{index+1}] {company_name} ({city})")
         enrichment_logs.append(f"Processing company #{index+1}: {company_name} | sede: {city} | setor: {company_copy.get('setor', 'N/A')}")
 
-        site_query = get_search_query(company_name, city, "official")
+        site_query = get_search_query(company_name, city, "site")
         site_results = search_company_web_presence(site_query)
         print(f"  └─ Official site Query: '{site_query}'")
         print(f"     Results: {len(site_results)} found")
@@ -163,22 +173,27 @@ def enrichment_node(state: GraphState):
         else:
             evidence_lines.append("No address search evidence found.")
 
-
+        
         llm_prompt = "\n".join(evidence_lines)
         system_directive = (
-            "You are a Senior Corporate Intelligence Analyst. Your task is to synthesize "
-            "disparate search snippets into a structured company profile. Use these rules:\n\n"
-            "1. IDENTITY: Identify the most credible 'official_website' and the 'primary_cnpj' "
-            "(formatted XX.XXX.XXX/XXXX-XX). If found, extract the 'radical_cnpj' (first 8 digits).\n"
-            "2. PRESENCE: Extract the official 'linkedin_url' and the 'physical_address'.\n"
-            "3. HIERARCHY: Identify if the company is a subsidiary, a holding, or operates "
-            "under distinct consumer brands (e.g., Brand X is owned by Company Y). "
-            "List these in 'found_brands'.\n"
-            "4. CAPITAL: Look for mentions of major shareholders, investment rounds, or "
-            "stock ticker symbols (e.g., B3: XXXX). Summarize in 'corporate_group_notes'.\n"
-            "5. CONFIDENCE: If any field lacks high-quality evidence, return null for that key.\n\n"
-            "Return JSON with keys: official_website, primary_cnpj, radical_cnpj, linkedin_url, "
-            "physical_address, corporate_group_notes, found_brands (array)."
+            "You are a corporate intelligence analyst specializing in the Brazilian market. "
+            "Your goal is to extract specific identifiers for a company based on categorized search evidence. "
+            "The evidence is divided into blocks: 'Official', 'CNPJ', 'Linkedin', and 'Address'. "
+            "Prioritize information found in its respective category, but cross-reference data if needed. "
+            
+            "Instructions for data extraction:\n"
+            "1. official_website: Extract the most credible official URL. Avoid news articles or social media links here.\n"
+            "2. linkedin_url: Find the direct link to the company's official LinkedIn profile.\n"
+            "3. physical_address: Extract the most complete physical address found (street, number, city, state).\n"
+            "4. primary_cnpj: Extract the full 14-digit Brazilian CNPJ. Clean it of any formatting (dots, slashes).\n"
+            "5. radical_cnpj: This is the first 8 digits of the primary_cnpj. Extract it only if a valid CNPJ is found.\n"
+
+            "Rules:\n"
+            "- If evidence for any field is missing or inconclusive, return null.\n"
+            "- Do not hallucinate or guess data points.\n"
+            "- Output must be strictly a single JSON object with the following keys: "
+            "official_website (string/null), linkedin_url (string/null), physical_address (string/null), "
+            "primary_cnpj (string/null), radical_cnpj (string/null)."
         )
 
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
@@ -223,46 +238,67 @@ def enrichment_node(state: GraphState):
             parsed_output = {}
             enrichment_logs.append(f"   LLM Error for {company_name}: {str(e)}")
 
+        # Extract and validate official_website
         official_website = parsed_output.get("official_website")
         if isinstance(official_website, str) and official_website.strip():
             company_copy["official_website"] = official_website.strip()
-            print(f"     ✓ Website: {official_website.strip()}")
+            print(f"     ✓ official_website: {official_website.strip()}")
             enrichment_logs.append(f"   ✓ official_website: {official_website.strip()}")
         else:
-            # Default to None so downstream stage treats signal as uncertain
             company_copy["official_website"] = None
-            print(f"     ✗ Website: Not found")
+            print(f"     ✗ official_website: Not found")
             enrichment_logs.append(f"   ✗ official_website: Not determined")
 
+        # Extract and validate linkedin_url
+        linkedin_url = parsed_output.get("linkedin_url")
+        if isinstance(linkedin_url, str) and linkedin_url.strip():
+            company_copy["linkedin_url"] = linkedin_url.strip()
+            print(f"     ✓ linkedin_url: {linkedin_url.strip()}")
+            enrichment_logs.append(f"   ✓ linkedin_url: {linkedin_url.strip()}")
+        else:
+            company_copy["linkedin_url"] = None
+            print(f"     ✗ linkedin_url: Not found")
+            enrichment_logs.append(f"   ✗ linkedin_url: Not determined")
+
+        # Extract and validate physical_address
+        physical_address = parsed_output.get("physical_address")
+        if isinstance(physical_address, str) and physical_address.strip():
+            company_copy["physical_address"] = physical_address.strip()
+            print(f"     ✓ physical_address: {physical_address.strip()}")
+            enrichment_logs.append(f"   ✓ physical_address: {physical_address.strip()}")
+        else:
+            company_copy["physical_address"] = None
+            print(f"     ✗ physical_address: Not found")
+            enrichment_logs.append(f"   ✗ physical_address: Not determined")
+
+        # Extract and validate primary_cnpj
         primary_cnpj = parsed_output.get("primary_cnpj")
         if isinstance(primary_cnpj, str) and primary_cnpj.strip():
             company_copy["primary_cnpj"] = primary_cnpj.strip()
-            print(f"     ✓ CNPJ: {primary_cnpj.strip()}")
+            print(f"     ✓ primary_cnpj: {primary_cnpj.strip()}")
             enrichment_logs.append(f"   ✓ primary_cnpj: {primary_cnpj.strip()}")
         else:
             company_copy["primary_cnpj"] = None
-            print(f"     ✗ CNPJ: Not found")
+            print(f"     ✗ primary_cnpj: Not found")
             enrichment_logs.append(f"   ✗ primary_cnpj: Not determined")
 
-        corporate_notes = parsed_output.get("corporate_group_notes")
-        if isinstance(corporate_notes, str) and corporate_notes.strip():
-            company_copy["corporate_group_notes"] = corporate_notes.strip()
-            print(f"     ℹ Corporate: {corporate_notes.strip()}")
-            enrichment_logs.append(f"   ℹ corporate_group_notes: {corporate_notes.strip()}")
+        # Extract and validate radical_cnpj (must be exactly 8 digits)
+        radical_cnpj = parsed_output.get("radical_cnpj")
+        if isinstance(radical_cnpj, str) and radical_cnpj.strip():
+            radical_cnpj_clean = radical_cnpj.strip()
+            # Validate that radical_cnpj contains exactly 8 digits
+            if radical_cnpj_clean.isdigit() and len(radical_cnpj_clean) == 8:
+                company_copy["radical_cnpj"] = radical_cnpj_clean
+                print(f"     ✓ radical_cnpj: {radical_cnpj_clean}")
+                enrichment_logs.append(f"   ✓ radical_cnpj: {radical_cnpj_clean}")
+            else:
+                company_copy["radical_cnpj"] = None
+                print(f"     ✗ radical_cnpj: Invalid format (expected 8 digits, got '{radical_cnpj_clean}')")
+                enrichment_logs.append(f"   ✗ radical_cnpj: Invalid format (expected 8 digits)")
         else:
-            company_copy["corporate_group_notes"] = None
-
-        found_brands = parsed_output.get("found_brands")
-        if isinstance(found_brands, list):
-            company_copy["found_brands"] = [
-                str(brand).strip() for brand in found_brands if str(brand).strip()
-            ]
-            if company_copy["found_brands"]:
-                print(f"     ◆ Brands: {', '.join(company_copy['found_brands'])}")
-                enrichment_logs.append(f"   ◆ found_brands: {company_copy['found_brands']}")
-        else:
-            # Keep empty list so later collector can append safely
-            company_copy["found_brands"] = company_copy.get("found_brands") or []
+            company_copy["radical_cnpj"] = None
+            print(f"     ✗ radical_cnpj: Not found")
+            enrichment_logs.append(f"   ✗ radical_cnpj: Not determined")
 
         enriched_companies.append(company_copy)
         processed_count += 1
