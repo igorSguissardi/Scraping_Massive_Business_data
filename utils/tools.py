@@ -14,19 +14,21 @@ def get_search_query(nome_empresa: str, sede: str, search_type: str) -> str:
 
     normalized_type = search_type.lower().strip()
 
-    if normalized_type == "social":
-        query = f"{nome_empresa} {sede} LinkedIn official profile"
+    if normalized_type == "linkedin":
+        query = f"{nome_empresa} {sede} LinkedIn perfil oficial"
     elif normalized_type == "cnpj":
         query = f"{nome_empresa} {sede} CNPJ Receita Federal"
-    elif normalized_type == "official":
+    elif normalized_type == "site": 
         query = f"{nome_empresa} {sede} site oficial"
+    elif normalized_type == "address": 
+        query = f"{nome_empresa} {sede} endereço físico sede"
     else:
-        query = f"{nome_empresa} {sede} corporate presence"
+        print("nada a ser pesquisado")
 
     return query.strip()
 
 
-def search_company_web_presence(query: str, max_results: int = 5) -> List[Dict[str, str]]:
+def search_company_web_presence(query: str, max_results: int = 4) -> List[Dict[str, str]]:
     """
     Execute DuckDuckGo search for company presence.
     """

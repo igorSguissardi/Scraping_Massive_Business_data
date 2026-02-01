@@ -97,32 +97,44 @@ def enrichment_node(state: GraphState):
         print(f"\n[SEARCH #{index+1}] {company_name} ({city})")
         enrichment_logs.append(f"Processing company #{index+1}: {company_name} | sede: {city} | setor: {company_copy.get('setor', 'N/A')}")
 
-        official_query = get_search_query(company_name, city, "official")
-        official_results = search_company_web_presence(official_query)
-        print(f"  └─ Official Query: '{official_query}'")
-        print(f"     Results: {len(official_results)} found")
+        site_query = get_search_query(company_name, city, "official")
+        site_results = search_company_web_presence(site_query)
+        print(f"  └─ Official site Query: '{site_query}'")
+        print(f"     Results: {len(site_results)} found")
 
         cnpj_query = get_search_query(company_name, city, "cnpj")
         cnpj_results = search_company_web_presence(cnpj_query)
         print(f"  └─ CNPJ Query: '{cnpj_query}'")
         print(f"     Results: {len(cnpj_results)} found")
 
+        linkedin_query = get_search_query(company_name, city, "linkedin")
+        linkedin_results = search_company_web_presence(linkedin_query)
+        print(f"  └─ Linkedin Query: '{linkedin_query}'")
+        print(f"     Results: {len(linkedin_results)} found")
+
+        address_query = get_search_query(company_name, city, "address")
+        address_results = search_company_web_presence(address_query)
+        print(f"  └─ Adress Query: '{address_query}'")
+        print(f"     Results: {len(address_results)} found")
+
+        
         evidence_lines = [
             f"Company: {company_name}",
             f"City: {city or 'Unknown'}",
-            "Official search results:",
+            "Search results:",
         ]
 
-        if official_results:
-            for rank, item in enumerate(official_results, start=1):
+        #Appending results from sites search
+        if site_results:
+            for rank, item in enumerate(site_results, start=1):
                 evidence_lines.append(
                     f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
                 )
         else:
             evidence_lines.append("No official search evidence found.")
 
+        #Appending results from cnpj search
         evidence_lines.append("CNPJ search results:")
-
         if cnpj_results:
             for rank, item in enumerate(cnpj_results, start=1):
                 evidence_lines.append(
@@ -131,14 +143,42 @@ def enrichment_node(state: GraphState):
         else:
             evidence_lines.append("No CNPJ search evidence found.")
 
+        # Appending results from Linkedin research
+        evidence_lines.append("Linkedin search results:")
+        if linkedin_results:
+            for rank, item in enumerate(linkedin_results, start=1):
+                evidence_lines.append(
+                    f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
+                )
+        else:
+            evidence_lines.append("No Linkedin search evidence found.")
+
+        # Appending results from address research
+        evidence_lines.append("Address search results:")
+        if address_results:
+            for rank, item in enumerate(address_results, start=1):
+                evidence_lines.append(
+                    f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
+                )
+        else:
+            evidence_lines.append("No address search evidence found.")
+
+
         llm_prompt = "\n".join(evidence_lines)
         system_directive = (
-            "You are a corporate intelligence analyst. "
-            "Pick the most credible official website URL and primary Brazilian CNPJ based on evidence. "
-            "If evidence is inconclusive, return null for that field. "
-            "Identify any corporate group relationship or notable brand connection and include a short note. "
-            "Return JSON with keys: official_website (string or null), primary_cnpj (string or null), "
-            "corporate_group_notes (string or null), found_brands (array of string)."
+            "You are a Senior Corporate Intelligence Analyst. Your task is to synthesize "
+            "disparate search snippets into a structured company profile. Use these rules:\n\n"
+            "1. IDENTITY: Identify the most credible 'official_website' and the 'primary_cnpj' "
+            "(formatted XX.XXX.XXX/XXXX-XX). If found, extract the 'radical_cnpj' (first 8 digits).\n"
+            "2. PRESENCE: Extract the official 'linkedin_url' and the 'physical_address'.\n"
+            "3. HIERARCHY: Identify if the company is a subsidiary, a holding, or operates "
+            "under distinct consumer brands (e.g., Brand X is owned by Company Y). "
+            "List these in 'found_brands'.\n"
+            "4. CAPITAL: Look for mentions of major shareholders, investment rounds, or "
+            "stock ticker symbols (e.g., B3: XXXX). Summarize in 'corporate_group_notes'.\n"
+            "5. CONFIDENCE: If any field lacks high-quality evidence, return null for that key.\n\n"
+            "Return JSON with keys: official_website, primary_cnpj, radical_cnpj, linkedin_url, "
+            "physical_address, corporate_group_notes, found_brands (array)."
         )
 
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
