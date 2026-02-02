@@ -412,10 +412,11 @@ def enrichment_node(state: GraphState):
             corporate_group_notes = parsed_output_phase2.get("corporate_group_notes")
             if isinstance(corporate_group_notes, str) and corporate_group_notes.strip():
                 company_copy["corporate_group_notes"] = corporate_group_notes.strip()
-                print(f"     ✓ corporate_group_notes: {corporate_group_notes.strip()[:60]}...")
-                enrichment_logs.append(f"   ✓ corporate_group_notes: {corporate_group_notes.strip()[:60]}...")
+                print(f"     ✓ corporate_group_notes: {corporate_group_notes.strip()}")
+                enrichment_logs.append(f"   ✓ corporate_group_notes: {corporate_group_notes.strip()}")
             else:
                 company_copy["corporate_group_notes"] = None
+                print(f"     ✗ corporate_group_notes: Not found in deep search")
             
             # Extract found_brands from Phase 2
             found_brands = parsed_output_phase2.get("found_brands", [])
@@ -423,10 +424,14 @@ def enrichment_node(state: GraphState):
                 found_brands = [str(b).strip() for b in found_brands if isinstance(b, (str, int)) and str(b).strip()]
                 company_copy["found_brands"] = found_brands
                 if found_brands:
-                    print(f"     ✓ found_brands: {', '.join(found_brands)}")
-                    enrichment_logs.append(f"   ✓ found_brands: {', '.join(found_brands)}")
+                    print(f"     ✓ found_brands: {found_brands}")
+                    enrichment_logs.append(f"   ✓ found_brands: {found_brands}")
+                else:
+                    print(f"     ✗ found_brands: Empty array (no brands found)")
+                    enrichment_logs.append(f"   ✗ found_brands: Empty")
             else:
                 company_copy["found_brands"] = []
+                print(f"     ✗ found_brands: Invalid format")
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
