@@ -34,3 +34,5 @@ class GraphState(TypedDict):
     execution_logs: Annotated[List[str], operator.add]
     # Track LLM API calls for cost auditing and rate limit management
     llm_request_count: int
+    # Store CSV sniper results for corporate structure enrichment
+    corporate_csv_evidence: Optional[str]

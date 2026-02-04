@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
-from utils.tools import get_search_query, search_company_web_presence, get_mock_corporate_data
+from utils.tools import get_search_query, search_company_web_presence, get_mock_corporate_data, get_filtered_csv_data
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
@@ -89,7 +89,7 @@ def enrichment_node(state: GraphState):
     llm_request_count = 0  # Track number of LLM API calls
 
     for index, company in enumerate(source_companies):
-        if index >= 5:
+        if index >= 2:
             # Expand to full set later so batching keeps throughput safe
             enriched_companies.append(company)
             continue
@@ -320,118 +320,175 @@ def enrichment_node(state: GraphState):
             sector_match = any(keyword.lower() in sector.lower() for keyword in high_priority_keywords)
             qualifies_for_deep_search = sector_match
         
-        # ===== FETCH CORPORATE STRUCTURE IF QUALIFIED =====
+        # ===== FETCH CORPORATE STRUCTURE IF QUALIFIED - USING SNIPER CSV DATA =====
         deep_search_content = None
+        corporate_csv_evidence = None
         if qualifies_for_deep_search and company_copy.get("primary_cnpj"):
-            company_cnpj_or_name = company_copy.get("primary_cnpj") or company_name
-            try:
-                deep_search_content = asyncio.run(get_mock_corporate_data(company_name))
-                if deep_search_content:
-                    print(f"  └─ [DEEP SEARCH] Using Mock Data - Retrieved {len(deep_search_content)} chars of corporate structure")
-                    enrichment_logs.append(f"   Deep search (Mock): Retrieved corporate structure ({len(deep_search_content)} chars)")
-            except Exception as e:
-                enrichment_logs.append(f"   Deep search failed: {str(e)}")
-            print(f"  └─ [PHASE 2] Analyzing deep search data for Neo4j fields...")
+            primary_cnpj = company_copy.get("primary_cnpj")
+            print(f"  └─ [SNIPER] Filtering CSV data for CNPJ: {primary_cnpj}")
             
-            system_directive_phase2 = (
-                "You are a corporate structure analyst specializing in Brazilian company ownership hierarchies. "
-                "Your task is to analyze societary structure data (QSA tables, shareholders, directors) from cnpj.biz "
-                "and extract information about corporate groups and subsidiary brands.\n\n"
-                
-                "DATA ACCESS:\n"
-                "You have raw HTML tables and text containing:\n"
-                "- QSA (Quadro de Sócio-Administrador): Lists all owners and administrators\n"
-                "- Shareholders information: Shows equity distribution\n"
-                "- Director/President names: Key decision makers\n\n"
-                
-                "EXTRACTION INSTRUCTIONS:\n"
-                "1. corporate_group_notes (string): If this company is part of a larger holding or conglomerate, "
-                "summarize the ownership structure in clear format. Examples:\n"
-                "   - 'Owned by [Holding Name] via [Parent Company]'\n"
-                "   - 'Part of [Conglomerate] industrial group'\n"
-                "   - 'Subsidiary of [Parent Corp] (stake: X%)'\n"
-                "   If the company is independent or no group structure is evident, return null.\n\n"
-                "2. found_brands (array of strings): If the societary tables mention subsidiary companies, brands, "
-                "or operating entities under this corporation, list them. Extract brand names and company names mentioned. "
-                "Return as JSON array ['Brand1', 'Brand2', 'Subsidiary3']. If no subsidiaries/brands found, return empty array [].\n\n"
-                
-                "OUTPUT FORMAT:\n"
-                "Return strictly a single JSON object with exactly these keys:\n"
-                "{\n"
-                "  \"corporate_group_notes\": \"string or null\",\n"
-                "  \"found_brands\": [\"array\", \"of\", \"strings\"]\n"
-                "}\n\n"
-                
-                "RULES:\n"
-                "- Extract only what is explicitly stated in the data. Do not infer or hallucinate relationships.\n"
-                "- If ownership structure is unclear or ambiguous, return null for corporate_group_notes.\n"
-                "- For found_brands, only include explicitly mentioned entities, not speculative ones.\n"
-                "- Keep corporate_group_notes concise (max 150 characters).\n"
-                "- found_brands array should contain 0-10 items typically."
-            )
+            sniper_parts = []
             
-            try:
-                enrichment_llm = get_enrichment_llm()
-                llm_request_count += 1  # Increment counter
-                print(f"  └─ [LLM REQUEST #{llm_request_count}] Sending deep search analysis prompt...")
-                llm_response_phase2 = enrichment_llm.invoke(
-                    [
-                        {"role": "system", "content": system_directive_phase2},
-                        {"role": "user", "content": deep_search_content},
-                    ]
+            # Call shareholding sniper - Neo4j Knowledge Graph focused extraction
+            shareholding_data, shareholding_rows = get_filtered_csv_data(primary_cnpj, "shareholding")
+            if shareholding_data:
+                sniper_parts.append(shareholding_data)
+                enrichment_logs.append(f"   ✓ Sniper: Data extracted from fre_cia_aberta_posicao_acionaria_2025.csv")
+                enrichment_logs.append(f"   ✓ Sniper: {shareholding_rows} ownership records found for this company")
+                print(f"     ✓ Sniper: Data extracted from fre_cia_aberta_posicao_acionaria_2025.csv")
+                print(f"     ✓ Sniper: {shareholding_rows} ownership records found for this company")
+            else:
+                enrichment_logs.append(f"   ✗ Sniper: No ownership records found in fre_cia_aberta_posicao_acionaria_2025.csv")
+            
+            # Call governance sniper
+            governance_data, governance_rows = get_filtered_csv_data(primary_cnpj, "governance")
+            if governance_data:
+                sniper_parts.append(governance_data)
+                enrichment_logs.append(f"   ✓ Sniper: {governance_rows} governance records found for this company")
+                print(f"     ✓ Sniper: {governance_rows} governance records found for this company")
+            
+            if sniper_parts:
+                deep_search_content = "\n\n".join(sniper_parts)
+                corporate_csv_evidence = deep_search_content
+                print(f"  └─ [DEEP SEARCH] Using CSV Sniper Data - Retrieved {len(deep_search_content)} chars from official sources")
+            else:
+                enrichment_logs.append(f"   ✗ Sniper: No records found for CNPJ {primary_cnpj}")
+            
+            if deep_search_content:
+                print(f"  └─ [PHASE 2] Analyzing corporate structure data for Neo4j fields...")
+                
+                system_directive_phase2 = (
+                    "You are a corporate structure analyst specializing in Brazilian company ownership hierarchies. "
+                    "Your task is to analyze official FRE shareholding data from CVM (Brazil's Securities Commission) "
+                    "and extract information about corporate groups, beneficial owners, and control structures for Neo4j Knowledge Graph construction.\n\n"
+                    
+                    "DATA SOURCE:\n"
+                    "Official CVM filing data (fre_cia_aberta_posicao_acionaria_2025.csv) containing:\n"
+                    "- CNPJ_Companhia: Target company unique identifier\n"
+                    "- Nome_Companhia: Company name\n"
+                    "- Acionista: Shareholder name (Person or Company)\n"
+                    "- CPF_CNPJ_Acionista: Shareholder's unique identifier\n"
+                    "- Percentual_Total_Acoes_Circulacao: Ownership percentage\n"
+                    "- Acionista_Controlador: Binary (S/N) indicating controlling shareholder\n"
+                    "- Participante_Acordo_Acionistas: Binary (S/N) indicating voting agreement participation\n\n"
+                    
+                    "EXTRACTION INSTRUCTIONS FOR NEO4J KNOWLEDGE GRAPH:\n"
+                    "1. corporate_group_notes (string): Identify the ultimate beneficial owner(s) and control structure:\n"
+                    "   - If Acionista_Controlador='S' exists, name the controlling shareholder with percentage\n"
+                    "   - If multiple controlling shareholders, list hierarchy\n"
+                    "   - If independent (no controlling shareholder), return 'Independent company - no controlling shareholder'\n"
+                    "   - Keep it concise: max 150 characters\n"
+                    "   Examples:\n"
+                    "   - 'Controlled by [Name] with [X]%' (if single controller)\n"
+                    "   - 'Jointly controlled by [Name A] and [Name B]' (if multiple)\n"
+                    "   - 'Independent company - no controlling shareholder' (if none)\n\n"
+                    "2. found_brands (array of strings): Extract distinct shareholder entities (potential subsidiary/brand nodes):\n"
+                    "   - List all unique Acionista names with Acionista_Controlador='S' or high percentages (>10%)\n"
+                    "   - These become nodes in the ownership graph\n"
+                    "   - Return as JSON array: ['Entity1', 'Entity2', 'Entity3']\n"
+                    "   - If no controlling shareholders or significant stakes, return empty array []\n\n"
+                    
+                    "OUTPUT FORMAT:\n"
+                    "Return STRICTLY a single JSON object:\n"
+                    "{\n"
+                    "  \"corporate_group_notes\": \"string or null\",\n"
+                    "  \"found_brands\": [\"array\", \"of\", \"shareholder\", \"entities\"]\n"
+                    "}\n\n"
+                    
+                    "RULES:\n"
+                    "- Extract ONLY what is explicitly stated in the CVM data. No inference or hallucination.\n"
+                    "- For corporate_group_notes: Focus on Acionista_Controlador='S' entries\n"
+                    "- For found_brands: Include shareholders with S='S' (controlling) or percentages > 10%\n"
+                    "- Preserve exact spelling of shareholder names for Neo4j node matching\n"
+                    "- If no controlling shareholder found, mark as 'Independent company - no controlling shareholder'"
                 )
-                analysis_text_phase2 = getattr(llm_response_phase2, "content", str(llm_response_phase2))
                 
-                if not analysis_text_phase2 or not analysis_text_phase2.strip():
-                    raise ValueError("LLM returned empty response for deep search analysis")
+                # ===== DEBUG: Log Phase 2 Prompt Content =====
+                print(f"\n  ╔════════════════════════════════════════════════════════════════╗")
+                print(f"  ║          [PHASE 2 DEBUG] Deep Search LLM Input                ║")
+                print(f"  ╚════════════════════════════════════════════════════════════════╝")
+                print(f"\n  [SYSTEM PROMPT]:")
+                print(f"  ─────────────────────────────────────────────────────────────────")
+                print(system_directive_phase2)
+                print(f"\n  [USER CONTENT - CSV Data Being Analyzed]:")
+                print(f"  ─────────────────────────────────────────────────────────────────")
+                print(deep_search_content)
+                print(f"  ─────────────────────────────────────────────────────────────────\n")
                 
-                # Extract JSON from markdown code blocks if present
-                if "```json" in analysis_text_phase2:
-                    json_start = analysis_text_phase2.find("```json") + 7
-                    json_end = analysis_text_phase2.find("```", json_start)
-                    if json_end != -1:
-                        analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
-                elif "```" in analysis_text_phase2:
-                    json_start = analysis_text_phase2.find("```") + 3
-                    json_end = analysis_text_phase2.find("```", json_start)
-                    if json_end != -1:
-                        analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
+                try:
+                    enrichment_llm = get_enrichment_llm()
+                    llm_request_count += 1
+                    print(f"  └─ [LLM REQUEST #{llm_request_count}] Analyzing CSV structure data...")
+                    llm_response_phase2 = enrichment_llm.invoke(
+                        [
+                            {"role": "system", "content": system_directive_phase2},
+                            {"role": "user", "content": deep_search_content},
+                        ]
+                    )
+                    analysis_text_phase2 = getattr(llm_response_phase2, "content", str(llm_response_phase2))
+                    
+                    # ===== DEBUG: Log LLM Response =====
+                    print(f"\n  [LLM RESPONSE - Raw]:")
+                    print(f"  ─────────────────────────────────────────────────────────────────")
+                    print(analysis_text_phase2)
+                    print(f"  ─────────────────────────────────────────────────────────────────\n")
+                    
+                    if not analysis_text_phase2 or not analysis_text_phase2.strip():
+                        raise ValueError("LLM returned empty response for deep search analysis")
+                    
+                    # Extract JSON from markdown code blocks if present
+                    if "```json" in analysis_text_phase2:
+                        json_start = analysis_text_phase2.find("```json") + 7
+                        json_end = analysis_text_phase2.find("```", json_start)
+                        if json_end != -1:
+                            analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
+                    elif "```" in analysis_text_phase2:
+                        json_start = analysis_text_phase2.find("```") + 3
+                        json_end = analysis_text_phase2.find("```", json_start)
+                        if json_end != -1:
+                            analysis_text_phase2 = analysis_text_phase2[json_start:json_end].strip()
+                    
+                    # ===== DEBUG: Log Extracted JSON =====
+                    print(f"  [LLM RESPONSE - Extracted JSON]:")
+                    print(f"  ─────────────────────────────────────────────────────────────────")
+                    print(analysis_text_phase2)
+                    print(f"  ─────────────────────────────────────────────────────────────────\n")
+                    
+                    parsed_output_phase2 = json.loads(analysis_text_phase2)
+                    print(f"  └─ Phase 2 Analysis: Success")
+                except json.JSONDecodeError as e:
+                    print(f"  └─ Phase 2 Analysis: JSON Parse Error - {str(e)}")
+                    parsed_output_phase2 = {}
+                    enrichment_logs.append(f"   Phase 2 JSON Error for {company_name}: Invalid JSON format")
+                except Exception as e:
+                    print(f"  └─ Phase 2 Analysis: Failed ({str(e)})")
+                    parsed_output_phase2 = {}
+                    enrichment_logs.append(f"   Phase 2 LLM Error for {company_name}: {str(e)}")
                 
-                parsed_output_phase2 = json.loads(analysis_text_phase2)
-                print(f"  └─ Phase 2 Analysis: Success")
-            except json.JSONDecodeError as e:
-                print(f"  └─ Phase 2 Analysis: JSON Parse Error - {str(e)}")
-                parsed_output_phase2 = {}
-                enrichment_logs.append(f"   Phase 2 JSON Error for {company_name}: Invalid JSON format")
-            except Exception as e:
-                print(f"  └─ Phase 2 Analysis: Failed ({str(e)})")
-                parsed_output_phase2 = {}
-                enrichment_logs.append(f"   Phase 2 LLM Error for {company_name}: {str(e)}")
-            
-            # Extract corporate_group_notes from Phase 2
-            corporate_group_notes = parsed_output_phase2.get("corporate_group_notes")
-            if isinstance(corporate_group_notes, str) and corporate_group_notes.strip():
-                company_copy["corporate_group_notes"] = corporate_group_notes.strip()
-                print(f"     ✓ corporate_group_notes: {corporate_group_notes.strip()}")
-                enrichment_logs.append(f"   ✓ corporate_group_notes: {corporate_group_notes.strip()}")
-            else:
-                company_copy["corporate_group_notes"] = None
-                print(f"     ✗ corporate_group_notes: Not found in deep search")
-            
-            # Extract found_brands from Phase 2
-            found_brands = parsed_output_phase2.get("found_brands", [])
-            if isinstance(found_brands, list):
-                found_brands = [str(b).strip() for b in found_brands if isinstance(b, (str, int)) and str(b).strip()]
-                company_copy["found_brands"] = found_brands
-                if found_brands:
-                    print(f"     ✓ found_brands: {found_brands}")
-                    enrichment_logs.append(f"   ✓ found_brands: {found_brands}")
+                # Extract corporate_group_notes from Phase 2
+                corporate_group_notes = parsed_output_phase2.get("corporate_group_notes")
+                if isinstance(corporate_group_notes, str) and corporate_group_notes.strip():
+                    company_copy["corporate_group_notes"] = corporate_group_notes.strip()
+                    print(f"     ✓ corporate_group_notes: {corporate_group_notes.strip()}")
+                    enrichment_logs.append(f"   ✓ corporate_group_notes: {corporate_group_notes.strip()}")
                 else:
-                    print(f"     ✗ found_brands: Empty array (no brands found)")
-                    enrichment_logs.append(f"   ✗ found_brands: Empty")
-            else:
-                company_copy["found_brands"] = []
-                print(f"     ✗ found_brands: Invalid format")
+                    company_copy["corporate_group_notes"] = None
+                    print(f"     ✗ corporate_group_notes: Not found")
+                
+                # Extract found_brands from Phase 2
+                found_brands = parsed_output_phase2.get("found_brands", [])
+                if isinstance(found_brands, list):
+                    found_brands = [str(b).strip() for b in found_brands if isinstance(b, (str, int)) and str(b).strip()]
+                    company_copy["found_brands"] = found_brands
+                    if found_brands:
+                        print(f"     ✓ found_brands: {found_brands}")
+                        enrichment_logs.append(f"   ✓ found_brands: {found_brands}")
+                    else:
+                        print(f"     ✗ found_brands: Empty array (no brands found)")
+                        enrichment_logs.append(f"   ✗ found_brands: Empty")
+                else:
+                    company_copy["found_brands"] = []
+                    print(f"     ✗ found_brands: Invalid format")
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
@@ -444,9 +501,10 @@ def enrichment_node(state: GraphState):
         f"Enrichment node processed {processed_count} companies with LLM-guided selection."
     )
     llm_summary = f"Total LLM API requests: {llm_request_count}"
-    deep_search_note = "Using Mock Data for Deep Enrichment phase (CSV Integration Pending)"
+    deep_search_note = "CSV Sniper integration active for corporate structure enrichment"
 
     return {
         "companies": enriched_companies,
         "execution_logs": [log_message, llm_summary, deep_search_note] + enrichment_logs,
+        "corporate_csv_evidence": corporate_csv_evidence,
     }

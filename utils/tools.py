@@ -1,13 +1,168 @@
 """Utility helpers for search-driven enrichment."""
 
 import asyncio
+import os
 import random
+import re
 import time
 from typing import Dict, List, Optional
 
+import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
+
+
+# ============================================================================
+# CNPJ SNIPER - CSV-Based Corporate Structure Enrichment
+# ============================================================================
+
+def clean_cnpj(cnpj_str: str) -> str:
+    """
+    Normalize a CNPJ string by removing all non-numeric characters.
+    
+    Args:
+        cnpj_str: CNPJ string with or without formatting (e.g., '00.000.000/0001-91' or '00000000000191')
+        
+    Returns:
+        Numeric-only CNPJ string (e.g., '00000000000191')
+    """
+    if not cnpj_str:
+        return ""
+    return re.sub(r'\D', '', str(cnpj_str))
+
+
+# Singleton for CSV caching - prevents repeated disk reads during parallel execution
+class _CSVCache:
+    """Thread-safe singleton for in-memory CSV caching."""
+    _instance = None
+    _dataframes = {}
+    
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(_CSVCache, cls).__new__(cls)
+        return cls._instance
+    
+    def get_shareholding(self) -> Optional[pd.DataFrame]:
+        """Load and cache the shareholding CSV (posicao_acionaria)."""
+        key = "shareholding"
+        if key not in self._dataframes:
+            try:
+                path = os.path.join(
+                    os.path.dirname(__file__),
+                    "../data/fre_cia_aberta_2025/fre_cia_aberta_posicao_acionaria_2025.csv"
+                )
+                # Load with proper encoding and separator (ISO-8859-1 for Brazilian CSV files)
+                df = pd.read_csv(path, sep=";", encoding="latin1")
+                self._dataframes[key] = df
+                print(f"[CACHE] Loaded shareholding CSV (fre_cia_aberta_posicao_acionaria_2025.csv): {len(df)} rows")
+            except Exception as e:
+                print(f"[ERROR] Failed to load shareholding CSV: {e}")
+                self._dataframes[key] = None
+        return self._dataframes[key]
+    
+    def get_governance(self) -> Optional[pd.DataFrame]:
+        """Load and cache the governance CSV (remuneracao_total_orgao)."""
+        key = "governance"
+        if key not in self._dataframes:
+            try:
+                path = os.path.join(
+                    os.path.dirname(__file__),
+                    "../data/fre_cia_aberta_2025/fre_cia_aberta_remuneracao_total_orgao_2025.csv"
+                )
+                # Load with proper encoding and separator (ISO-8859-1 for Brazilian CSV files)
+                df = pd.read_csv(path, sep=";", encoding="iso-8859-1")
+                self._dataframes[key] = df
+                print(f"[CACHE] Loaded governance CSV: {len(df)} rows")
+            except Exception as e:
+                print(f"[ERROR] Failed to load governance CSV: {e}")
+                self._dataframes[key] = None
+        return self._dataframes[key]
+
+
+def get_filtered_csv_data(target_cnpj: str, file_type: str) -> tuple[Optional[str], int]:
+    """
+    Filter CSV data by CNPJ using singleton-cached DataFrames.
+    Returns filtered rows as a Markdown table string for Neo4j Knowledge Graph extraction.
+    
+    Args:
+        target_cnpj: Target CNPJ (with or without formatting)
+        file_type: Either "shareholding" or "governance"
+        
+    Returns:
+        Tuple of (markdown_table_string or None, row_count)
+    """
+    if not target_cnpj or not target_cnpj.strip():
+        return None, 0
+    
+    # Normalize the target CNPJ
+    normalized_target = clean_cnpj(target_cnpj)
+    
+    cache = _CSVCache()
+    
+    if file_type.lower() == "shareholding":
+        df = cache.get_shareholding()
+        if df is None or df.empty:
+            return None, 0
+        
+        # Normalize CNPJ_Companhia column and filter
+        df_normalized = df.copy()
+        df_normalized["CNPJ_Normalized"] = df_normalized["CNPJ_Companhia"].apply(clean_cnpj)
+        filtered = df_normalized[df_normalized["CNPJ_Normalized"] == normalized_target]
+        
+        if filtered.empty:
+            return None, 0
+        
+        # Select Neo4j-critical columns for Knowledge Graph construction
+        # Identity Layer: CNPJ_Companhia, Nome_Companhia, CPF_CNPJ_Acionista, Acionista
+        # Relationship Layer: Percentual_Total_Acoes_Circulacao, Acionista_Controlador, Participante_Acordo_Acionistas
+        required_cols = [
+            "CNPJ_Companhia",
+            "Nome_Companhia", 
+            "Acionista",
+            "CPF_CNPJ_Acionista",
+            "Percentual_Total_Acoes_Circulacao",
+            "Acionista_Controlador",
+            "Participante_Acordo_Acionistas"
+        ]
+        
+        # Filter to available columns (some may not exist)
+        available_cols = [col for col in required_cols if col in filtered.columns]
+        filtered_selected = filtered[available_cols]
+        
+        # Convert to markdown table
+        markdown_table = filtered_selected.to_markdown(index=False)
+        return markdown_table, len(filtered_selected)
+    
+    elif file_type.lower() == "governance":
+        df = cache.get_governance()
+        if df is None or df.empty:
+            return None, 0
+        
+        # Normalize CNPJ_Companhia column and filter
+        df_normalized = df.copy()
+        df_normalized["CNPJ_Normalized"] = df_normalized["CNPJ_Companhia"].apply(clean_cnpj)
+        filtered = df_normalized[df_normalized["CNPJ_Normalized"] == normalized_target]
+        
+        if filtered.empty:
+            return None, 0
+        
+        # Select only Orgao_Administracao column for governance
+        required_cols = ["Orgao_Administracao"]
+        available_cols = [col for col in required_cols if col in filtered.columns]
+        
+        if available_cols:
+            filtered_selected = filtered[available_cols].drop_duplicates()
+        else:
+            return None, 0
+        
+        # Convert to markdown table
+        markdown_table = filtered_selected.to_markdown(index=False)
+        return markdown_table, len(filtered_selected)
+    
+    else:
+        print(f"[WARNING] Unknown file_type: {file_type}. Expected 'shareholding' or 'governance'")
+        return None, 0
 
 
 def get_search_query(nome_empresa: str, sede: str, search_type: str) -> str:
