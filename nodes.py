@@ -4,10 +4,11 @@ import json
 import os
 import requests
 from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
-from utils.tools import get_search_query, search_company_web_presence, get_mock_corporate_data, get_filtered_csv_data
+from utils.tools import get_search_query, search_company_web_presence, get_filtered_csv_data
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
@@ -201,12 +202,13 @@ def enrichment_node(state: GraphState):
             enrichment_llm = get_enrichment_llm()
             llm_request_count += 1  # Increment counter
             print(f"  └─ [LLM REQUEST #{llm_request_count}] Sending enrichment prompt...")
-            llm_response = enrichment_llm.invoke(
-                [
-                    {"role": "system", "content": system_directive},
-                    {"role": "user", "content": llm_prompt},
-                ]
-            )
+            
+            prompt_template_phase1 = ChatPromptTemplate.from_messages([
+                ("system", system_directive),
+                ("human", "{user_input}")
+            ])
+            chain = prompt_template_phase1 | enrichment_llm
+            llm_response = chain.invoke({"user_input": llm_prompt})
             analysis_text = getattr(llm_response, "content", str(llm_response))
             # Validate that we received a non-empty response
             if not analysis_text or not analysis_text.strip():
@@ -382,30 +384,30 @@ def enrichment_node(state: GraphState):
                     "- RECURSION: If a company is independent (no 'S'), set corporate_group_notes to 'Independent company'.\n\n"
 
                     "OUTPUT FORMAT (STRICT JSON):\n"
-                    "{"
-                    "corporate_group_notes": "A concise summary derived from Acionista_Controlador and Percentual_Total_Acoes_Circulacao",
-                    "relationships": [
-                        "{"
-                        "source_id": "CPF_CNPJ_Acionista",
-                        "source_name": "Acionista",
-                        "source_label": "Inferred: 'Person' if 11 digits, 'Company' if 14 digits",
-                        "target_id": "CNPJ_Companhia",
-                        "relationship_type": "OWNS",
-                        "properties": "{"
-                            "percentage": "Percentual_Total_Acoes_Circulacao",
-                            "is_controller": "True if Acionista_Controlador == 'S', else False"
-                        "}"
-                        "},"
-                        "{"
-                        "source_id": "CNPJ_Companhia",
-                        "target_id": "CPF_CNPJ_Acionista",
-                        "relationship_type": "SUBSIDIARY_OF",
-                        "properties": "{"
-                            "percentage": "Percentual_Total_Acoes_Circulacao"
-                        "}"
-                        "}"
-                    ]
-                    "}\n\n"
+                    "{{\n"
+                    "  \"corporate_group_notes\": \"A concise summary derived from Acionista_Controlador and Percentual_Total_Acoes_Circulacao\",\n"
+                    "  \"relationships\": [\n"
+                    "    {{\n"
+                    "      \"source_id\": \"CPF_CNPJ_Acionista\",\n"
+                    "      \"source_name\": \"Acionista\",\n"
+                    "      \"source_label\": \"'Person' if 11 digits, 'Company' if 14 digits\",\n"
+                    "      \"target_id\": \"CNPJ_Companhia\",\n"
+                    "      \"relationship_type\": \"OWNS\",\n"
+                    "      \"properties\": {{\n"
+                    "        \"percentage\": \"Percentual_Total_Acoes_Circulacao\",\n"
+                    "        \"is_controller\": \"True if Acionista_Controlador == 'S', else False\"\n"
+                    "      }}\n"
+                    "    }},\n"
+                    "    {{\n"
+                    "      \"source_id\": \"CNPJ_Companhia\",\n"
+                    "      \"target_id\": \"CPF_CNPJ_Acionista\",\n"
+                    "      \"relationship_type\": \"SUBSIDIARY_OF\",\n"
+                    "      \"properties\": {{\n"
+                    "        \"percentage\": \"Percentual_Total_Acoes_Circulacao\"\n"
+                    "      }}\n"
+                    "    }}\n"
+                    "  ]\n"
+                    "}}\n\n"
                     
                     "RULES:\n"
                     "- DO NOT hallucinate. Use only the provided business structure data\n"
@@ -429,12 +431,13 @@ def enrichment_node(state: GraphState):
                     enrichment_llm = get_enrichment_llm()
                     llm_request_count += 1
                     print(f"  └─ [LLM REQUEST #{llm_request_count}] Analyzing CSV structure data...")
-                    llm_response_phase2 = enrichment_llm.invoke(
-                        [
-                            {"role": "system", "content": system_directive_phase2},
-                            {"role": "user", "content": deep_search_content},
-                        ]
-                    )
+                    
+                    prompt_template_phase2 = ChatPromptTemplate.from_messages([
+                        ("system", system_directive_phase2),
+                        ("human", "{user_input}")
+                    ])
+                    chain = prompt_template_phase2 | enrichment_llm
+                    llm_response_phase2 = chain.invoke({"user_input": deep_search_content})
                     analysis_text_phase2 = getattr(llm_response_phase2, "content", str(llm_response_phase2))
                     
                     # ===== DEBUG: Log LLM Response =====
@@ -499,6 +502,19 @@ def enrichment_node(state: GraphState):
                 else:
                     company_copy["found_brands"] = []
                     print(f"     ✗ found_brands: Invalid format")
+                
+                # Extract relationships from Phase 2
+                relationships = parsed_output_phase2.get("relationships", [])
+                if isinstance(relationships, list) and relationships:
+                    print(f"     ✓ relationships: {len(relationships)} relationships found")
+                    print(f"\n  [RELATIONSHIPS EXTRACTED]:")
+                    print(f"  ─────────────────────────────────────────────────────────────────")
+                    print(json.dumps(relationships, indent=2, ensure_ascii=False))
+                    print(f"  ─────────────────────────────────────────────────────────────────\n")
+                    enrichment_logs.append(f"   ✓ relationships: {len(relationships)} relationships found")
+                else:
+                    print(f"     ✗ relationships: No relationships found")
+                    enrichment_logs.append(f"   ✗ relationships: Empty")
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
