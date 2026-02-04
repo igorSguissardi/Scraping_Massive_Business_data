@@ -7,7 +7,7 @@ from langchain_openai import ChatOpenAI
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
-from utils.tools import get_search_query, search_company_web_presence, fetch_corporate_structure
+from utils.tools import get_search_query, search_company_web_presence, get_mock_corporate_data
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
@@ -323,12 +323,12 @@ def enrichment_node(state: GraphState):
         # ===== FETCH CORPORATE STRUCTURE IF QUALIFIED =====
         deep_search_content = None
         if qualifies_for_deep_search and company_copy.get("primary_cnpj"):
-            primary_cnpj = company_copy.get("primary_cnpj")
+            company_cnpj_or_name = company_copy.get("primary_cnpj") or company_name
             try:
-                deep_search_content = asyncio.run(fetch_corporate_structure(primary_cnpj))
+                deep_search_content = asyncio.run(get_mock_corporate_data(company_name))
                 if deep_search_content:
-                    print(f"  └─ [DEEP SEARCH] Retrieved {len(deep_search_content)} chars of corporate structure")
-                    enrichment_logs.append(f"   Deep search: Retrieved corporate structure ({len(deep_search_content)} chars)")
+                    print(f"  └─ [DEEP SEARCH] Using Mock Data - Retrieved {len(deep_search_content)} chars of corporate structure")
+                    enrichment_logs.append(f"   Deep search (Mock): Retrieved corporate structure ({len(deep_search_content)} chars)")
             except Exception as e:
                 enrichment_logs.append(f"   Deep search failed: {str(e)}")
             print(f"  └─ [PHASE 2] Analyzing deep search data for Neo4j fields...")
@@ -444,8 +444,9 @@ def enrichment_node(state: GraphState):
         f"Enrichment node processed {processed_count} companies with LLM-guided selection."
     )
     llm_summary = f"Total LLM API requests: {llm_request_count}"
+    deep_search_note = "Using Mock Data for Deep Enrichment phase (CSV Integration Pending)"
 
     return {
         "companies": enriched_companies,
-        "execution_logs": [log_message, llm_summary] + enrichment_logs,
+        "execution_logs": [log_message, llm_summary, deep_search_note] + enrichment_logs,
     }
