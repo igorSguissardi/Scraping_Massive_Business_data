@@ -358,50 +358,60 @@ def enrichment_node(state: GraphState):
                 print(f"  └─ [PHASE 2] Analyzing corporate structure data for Neo4j fields...")
                 
                 system_directive_phase2 = (
-                    "You are a corporate structure analyst specializing in Brazilian company ownership hierarchies. "
-                    "Your task is to analyze official FRE shareholding data from CVM (Brazil's Securities Commission) "
-                    "and extract information about corporate groups, beneficial owners, and control structures for Neo4j Knowledge Graph construction.\n\n"
-                    
-                    "DATA SOURCE:\n"
-                    "Official CVM filing data (fre_cia_aberta_posicao_acionaria_2025.csv) containing:\n"
-                    "- CNPJ_Companhia: Target company unique identifier\n"
-                    "- Nome_Companhia: Company name\n"
-                    "- Acionista: Shareholder name (Person or Company)\n"
-                    "- CPF_CNPJ_Acionista: Shareholder's unique identifier\n"
-                    "- Percentual_Total_Acoes_Circulacao: Ownership percentage\n"
-                    "- Acionista_Controlador: Binary (S/N) indicating controlling shareholder\n"
-                    "- Participante_Acordo_Acionistas: Binary (S/N) indicating voting agreement participation\n\n"
-                    
-                    "EXTRACTION INSTRUCTIONS FOR NEO4J KNOWLEDGE GRAPH:\n"
-                    "1. corporate_group_notes (string): Identify the ultimate beneficial owner(s) and control structure:\n"
-                    "   - If Acionista_Controlador='S' exists, name the controlling shareholder with percentage\n"
-                    "   - If multiple controlling shareholders, list hierarchy\n"
-                    "   - If independent (no controlling shareholder), return 'Independent company - no controlling shareholder'\n"
-                    "   - Keep it concise: max 150 characters\n"
-                    "   Examples:\n"
-                    "   - 'Controlled by [Name] with [X]%' (if single controller)\n"
-                    "   - 'Jointly controlled by [Name A] and [Name B]' (if multiple)\n"
-                    "   - 'Independent company - no controlling shareholder' (if none)\n\n"
-                    "2. found_brands (array of strings): Extract distinct shareholder entities (potential subsidiary/brand nodes):\n"
-                    "   - List all unique Acionista names with Acionista_Controlador='S' or high percentages (>10%)\n"
-                    "   - These become nodes in the ownership graph\n"
-                    "   - Return as JSON array: ['Entity1', 'Entity2', 'Entity3']\n"
-                    "   - If no controlling shareholders or significant stakes, return empty array []\n\n"
-                    
-                    "OUTPUT FORMAT:\n"
-                    "Return STRICTLY a single JSON object:\n"
-                    "{\n"
-                    "  \"corporate_group_notes\": \"string or null\",\n"
-                    "  \"found_brands\": [\"array\", \"of\", \"shareholder\", \"entities\"]\n"
+                    "You are a specialized Corporate Graph Architect. Your role is to transform raw business structure data "
+                    "into structured JSON objects designed for Neo4j Knowledge Graph ingestion. Focus on extracting entities "
+                    "and the specific relationships: :OWNS and :SUBSIDIARY_OF.\n\n"
+
+                    "CORE DEFINITIONS:\n"
+                    "1. [:OWNS]: Triggered for ANY shareholder listed in the data. This captures the flow of capital.\n"
+                    "2. [:SUBSIDIARY_OF]: Triggered ONLY when the Acionista is a Company (PJ) AND (Acionista_Controlador='S' OR Percentage > 50%). "
+                    "This captures the legal hierarchy.\n\n"
+
+                    "DATA VARIABLES RECEIVED:\n"
+                    "- CNPJ_Companhia (Target Company ID)\n"
+                    "- Nome_Companhia (Target Company Name)\n"
+                    "- Acionista (Shareholder Name)\n"
+                    "- CPF_CNPJ_Acionista (Shareholder ID)\n"
+                    "- Percentual_Total_Acoes_Circulacao (Ownership %)\n"
+                    "- Acionista_Controlador (S/N)\n\n"
+
+                    "EXTRACTION RULES:\n"
+                    "- IDENTITIES: Use CPF_CNPJ_Acionista as the unique 'source_id' and CNPJ_Companhia as the 'target_id'.\n"
+                    "- PERCENTAGES: Always include the 'percentage' property as a float.\n"
+                    "- TYPES: Identify if the Acionista is a :Person (CPF) or a :Company (CNPJ) based on the ID length or format.\n"
+                    "- RECURSION: If a company is independent (no 'S'), set corporate_group_notes to 'Independent company'.\n\n"
+
+                    "OUTPUT FORMAT (STRICT JSON):\n"
+                    "{"
+                    "corporate_group_notes": "A concise summary derived from Acionista_Controlador and Percentual_Total_Acoes_Circulacao",
+                    "relationships": [
+                        "{"
+                        "source_id": "CPF_CNPJ_Acionista",
+                        "source_name": "Acionista",
+                        "source_label": "Inferred: 'Person' if 11 digits, 'Company' if 14 digits",
+                        "target_id": "CNPJ_Companhia",
+                        "relationship_type": "OWNS",
+                        "properties": "{"
+                            "percentage": "Percentual_Total_Acoes_Circulacao",
+                            "is_controller": "True if Acionista_Controlador == 'S', else False"
+                        "}"
+                        "},"
+                        "{"
+                        "source_id": "CNPJ_Companhia",
+                        "target_id": "CPF_CNPJ_Acionista",
+                        "relationship_type": "SUBSIDIARY_OF",
+                        "properties": "{"
+                            "percentage": "Percentual_Total_Acoes_Circulacao"
+                        "}"
+                        "}"
+                    ]
                     "}\n\n"
                     
                     "RULES:\n"
-                    "- Extract ONLY what is explicitly stated in the CVM data. No inference or hallucination.\n"
-                    "- For corporate_group_notes: Focus on Acionista_Controlador='S' entries\n"
-                    "- For found_brands: Include shareholders with S='S' (controlling) or percentages > 10%\n"
-                    "- Preserve exact spelling of shareholder names for Neo4j node matching\n"
-                    "- If no controlling shareholder found, mark as 'Independent company - no controlling shareholder'"
-                )
+                    "- DO NOT hallucinate. Use only the provided business structure data\n"
+                    "- Preserve exact shareholder names for Neo4j node matching.\n"
+                    "- If no relationships are found, return 'relationships': []."
+                    )
                 
                 # ===== DEBUG: Log Phase 2 Prompt Content =====
                 print(f"\n  ╔════════════════════════════════════════════════════════════════╗")
