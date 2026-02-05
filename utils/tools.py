@@ -4,7 +4,9 @@ import asyncio
 import os
 import random
 import re
+import threading
 import time
+import zipfile
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -16,6 +18,53 @@ from ddgs import DDGS
 # ============================================================================
 # CNPJ SNIPER - CSV-Based Corporate Structure Enrichment
 # ============================================================================
+
+_FRE_ZIP_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/fre_cia_aberta_2025.zip"
+_FRE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../data/fre_cia_aberta_2025"))
+_FRE_ZIP_PATH = os.path.join(_FRE_DIR, "fre_cia_aberta_2025.zip")
+_FRE_LOCK = threading.Lock()
+
+
+def _ensure_fre_csv(file_name: str) -> str:
+    """
+    Ensure the requested FRE CSV exists locally.
+
+    Downloads and extracts from CVM if missing.
+    Returns the absolute path to the CSV.
+    """
+    os.makedirs(_FRE_DIR, exist_ok=True)
+    csv_path = os.path.join(_FRE_DIR, file_name)
+
+    if os.path.exists(csv_path):
+        return csv_path
+
+    with _FRE_LOCK:
+        if os.path.exists(csv_path):
+            return csv_path
+
+        if not os.path.exists(_FRE_ZIP_PATH):
+            with requests.get(_FRE_ZIP_URL, stream=True, timeout=120) as response:
+                response.raise_for_status()
+                with open(_FRE_ZIP_PATH, "wb") as handle:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            handle.write(chunk)
+
+        with zipfile.ZipFile(_FRE_ZIP_PATH, "r") as zip_file:
+            candidate = None
+            for name in zip_file.namelist():
+                if name.endswith(file_name):
+                    candidate = name
+                    break
+            if candidate is None:
+                raise FileNotFoundError(f"CSV '{file_name}' not found in {_FRE_ZIP_PATH}")
+            zip_file.extract(candidate, _FRE_DIR)
+
+            extracted_path = os.path.join(_FRE_DIR, candidate)
+            if extracted_path != csv_path:
+                os.replace(extracted_path, csv_path)
+
+    return csv_path
 
 def clean_cnpj(cnpj_str: str) -> str:
     """
@@ -48,10 +97,7 @@ class _CSVCache:
         key = "shareholding"
         if key not in self._dataframes:
             try:
-                path = os.path.join(
-                    os.path.dirname(__file__),
-                    "../data/fre_cia_aberta_2025/fre_cia_aberta_posicao_acionaria_2025.csv"
-                )
+                path = _ensure_fre_csv("fre_cia_aberta_posicao_acionaria_2025.csv")
                 # Load with proper encoding and separator (ISO-8859-1 for Brazilian CSV files)
                 df = pd.read_csv(path, sep=";", encoding="latin1")
                 self._dataframes[key] = df
@@ -66,10 +112,7 @@ class _CSVCache:
         key = "governance"
         if key not in self._dataframes:
             try:
-                path = os.path.join(
-                    os.path.dirname(__file__),
-                    "../data/fre_cia_aberta_2025/fre_cia_aberta_remuneracao_total_orgao_2025.csv"
-                )
+                path = _ensure_fre_csv("fre_cia_aberta_remuneracao_total_orgao_2025.csv")
                 # Load with proper encoding and separator (ISO-8859-1 for Brazilian CSV files)
                 df = pd.read_csv(path, sep=";", encoding="iso-8859-1")
                 self._dataframes[key] = df
