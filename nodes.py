@@ -5,6 +5,9 @@ import os
 import requests
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
+from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
+import html2text
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
@@ -12,6 +15,7 @@ from utils.tools import get_search_query, search_company_web_presence, get_filte
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
+_MAX_COMPANIES = 2
 
 def get_enrichment_llm():
     """
@@ -31,6 +35,24 @@ def get_enrichment_llm():
         # Pass API key explicitly to ChatOpenAI
         _enrichment_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
     return _enrichment_llm
+
+
+def limit_companies_node(state: GraphState):
+    """
+    Limit the number of companies processed in downstream nodes.
+    """
+
+    print("--- NODE: Limit Companies ---")
+    source_companies = state.get("companies", [])
+    limited_companies = source_companies[:_MAX_COMPANIES]
+    log_message = (
+        f"Limited companies from {len(source_companies)} to {len(limited_companies)} for processing."
+    )
+
+    return {
+        "companies": limited_companies,
+        "execution_logs": [log_message],
+    }
 
 
 
@@ -84,17 +106,18 @@ def enrichment_node(state: GraphState):
 
     print("--- NODE: Enrichment ---")
     source_companies = state.get("companies", [])
+    if len(source_companies) > _MAX_COMPANIES:
+        print(
+            f"[GUARD] enrichment_node received {len(source_companies)} companies; "
+            f"trimming to {_MAX_COMPANIES}."
+        )
+        source_companies = source_companies[:_MAX_COMPANIES]
     enriched_companies = []
     processed_count = 0
     enrichment_logs = []
     llm_request_count = 0  # Track number of LLM API calls
 
     for index, company in enumerate(source_companies):
-        if index >= 2:
-            # Expand to full set later so batching keeps throughput safe
-            enriched_companies.append(company)
-            continue
-
         company_copy = dict(company)
         company_name = company_copy.get("nome_empresa", "").strip()
         city = company_copy.get("sede", "").strip()
@@ -560,4 +583,77 @@ def enrichment_node(state: GraphState):
         "companies": enriched_companies,
         "execution_logs": [log_message, llm_summary, deep_search_note] + enrichment_logs,
         "corporate_csv_evidence": corporate_csv_evidence,
+    }
+
+
+async def institutional_scraping_node(state: GraphState):
+    """
+    Extract institutional content from about_page_url and convert to markdown.
+    """
+
+    print("--- NODE: Institutional Scraping ---")
+    source_companies = state.get("companies", [])
+    if len(source_companies) > _MAX_COMPANIES:
+        print(
+            f"[GUARD] institutional_scraping_node received {len(source_companies)} companies; "
+            f"trimming to {_MAX_COMPANIES}."
+        )
+        source_companies = source_companies[:_MAX_COMPANIES]
+    markdown_results = []
+    scraping_logs = []
+
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        context = await browser.new_context()
+        page = await context.new_page()
+
+        for index, company in enumerate(source_companies):
+            company_name = company.get("nome_empresa", "Unknown")
+            about_page_url = company.get("about_page_url")
+
+            if not about_page_url:
+                markdown_results.append(None)
+                scraping_logs.append(f"[SKIPPED] Company #{index+1}: Missing about_page_url")
+                continue
+
+            try:
+                response = await page.goto(about_page_url, wait_until="domcontentloaded", timeout=10000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=5000)
+                except Exception:
+                    await page.wait_for_timeout(5000)
+
+                if response and response.status >= 400:
+                    raise ValueError(f"HTTP {response.status}")
+
+                raw_html = await page.content()
+                soup = BeautifulSoup(raw_html, "html.parser")
+
+                for tag in soup(["script", "style", "header", "footer", "nav", "noscript"]):
+                    tag.decompose()
+
+                body = soup.body or soup
+                cleaned_html = str(body)
+
+                markdown = html2text.html2text(cleaned_html)
+                markdown = "\n".join(line.strip() for line in markdown.splitlines() if line.strip())
+
+                if markdown:
+                    markdown_results.append(markdown)
+                    scraping_logs.append(f"✓ Institutional markdown captured for {company_name}")
+                    print(f"\n[INSTITUTIONAL MARKDOWN] {company_name}")
+                    print(markdown)
+                else:
+                    markdown_results.append(None)
+                    scraping_logs.append(f"✗ Institutional markdown empty for {company_name}")
+            except Exception as e:
+                markdown_results.append(None)
+                scraping_logs.append(f"✗ Institutional scrape failed for {company_name}: {str(e)}")
+
+        await context.close()
+        await browser.close()
+
+    return {
+        "institutional_markdown": markdown_results,
+        "execution_logs": scraping_logs,
     }

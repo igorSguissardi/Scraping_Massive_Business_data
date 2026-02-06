@@ -17,6 +17,7 @@ class CompanyRecord(TypedDict, total=False):
     razao_social: Optional[str]
     official_website: Optional[str]
     linkedin_url: Optional[str]
+    about_page_url: Optional[str]
     primary_cnpj: Optional[str]
     found_brands: List[str]
     corporate_group_notes: Optional[str]
@@ -36,3 +37,5 @@ class GraphState(TypedDict):
     llm_request_count: int
     # Store CSV sniper results for corporate structure enrichment
     corporate_csv_evidence: Optional[str]
+    # Store institutional content distilled into markdown
+    institutional_markdown: Annotated[List[Optional[str]], operator.add]
