@@ -129,6 +129,11 @@ def enrichment_node(state: GraphState):
         print(f"  └─ Adress Query: '{address_query}'")
         print(f"     Results: {len(address_results)} found")
 
+        about_query = f"{company_name} Sobre"
+        about_results = search_company_web_presence(about_query)
+        print(f"  └─ About Query: '{about_query}'")
+        print(f"     Results: {len(about_results)} found")
+
         
         evidence_lines = [
             f"Company: {company_name}",
@@ -174,7 +179,17 @@ def enrichment_node(state: GraphState):
                 )
         else:
             evidence_lines.append("No address search evidence found.")
-        
+
+        # Appending results from about/institutional research
+        evidence_lines.append("About/Institutional search results:")
+        if about_results:
+            for rank, item in enumerate(about_results, start=1):
+                evidence_lines.append(
+                    f"{rank}. Title: {item.get('title', '')}\n   Link: {item.get('link', '')}\n   Snippet: {item.get('snippet', '')}"
+                )
+        else:
+            evidence_lines.append("No about/institutional search evidence found.")
+
         llm_prompt = "\n".join(evidence_lines)
         system_directive = (
             "You are a corporate intelligence analyst specializing in the Brazilian market. "
@@ -188,13 +203,14 @@ def enrichment_node(state: GraphState):
             "3. physical_address: Extract the most complete physical address found (street, number, city, state).\n"
             "4. primary_cnpj: Extract the full 14-digit Brazilian CNPJ. Clean it of any formatting (dots, slashes).\n"
             "5. radical_cnpj: This is the first 8 digits of the primary_cnpj. Extract it only if a valid CNPJ is found.\n"
+            "6. about_page_url: Extract the specific URL that leads to the 'About Us', 'Quem Somos', 'sobre nos', 'História' or similar institutional page.\n"
 
             "Rules:\n"
             "- If evidence for any field is missing or inconclusive, return null.\n"
             "- Do not hallucinate or guess data points.\n"
             "- Output must be strictly a single JSON object with the following keys: "
             "official_website (string/null), linkedin_url (string/null), physical_address (string/null), "
-            "primary_cnpj (string/null), radical_cnpj (string/null)."
+            "primary_cnpj (string/null), radical_cnpj (string/null), about_page_url (string/null)."
         )
 
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
@@ -301,6 +317,17 @@ def enrichment_node(state: GraphState):
             company_copy["radical_cnpj"] = None
             print(f"     ✗ radical_cnpj: Not found")
             enrichment_logs.append(f"   ✗ radical_cnpj: Not determined")
+
+        # Extract and validate about_page_url
+        about_page_url = parsed_output.get("about_page_url")
+        if isinstance(about_page_url, str) and about_page_url.strip():
+            company_copy["about_page_url"] = about_page_url.strip()
+            print(f"     ✓ about_page_url: {about_page_url.strip()}")
+            enrichment_logs.append(f"   ✓ about_page_url: {about_page_url.strip()}")
+        else:
+            company_copy["about_page_url"] = None
+            print(f"     ✗ about_page_url: Not found")
+            enrichment_logs.append(f"   ✗ about_page_url: Not determined")
 
         # ===== CHECK IF COMPANY QUALIFIES FOR DEEP SEARCH (After Phase 1 extraction) =====
         # Criteria: High-value sectors (Holding, Petróleo, Finanças) or Revenue > 5000 million R$
