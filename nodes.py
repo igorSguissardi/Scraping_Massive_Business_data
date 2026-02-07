@@ -17,6 +17,101 @@ from utils.tools import get_search_query, search_company_web_presence, get_filte
 _enrichment_llm = None
 _MAX_COMPANIES = 2
 
+
+def prepare_company_fanout(state: GraphState):
+    """
+    Stage companies for per-company fan-out.
+    """
+    source_companies = state.get("company_queue", [])
+    return {
+        "company_queue": source_companies,
+        "execution_logs": [f"Prepared {len(source_companies)} companies for per-company processing."],
+    }
+
+
+def enrichment_company_node(state: dict):
+    """
+    Run enrichment for a single company by reusing the batch enrichment node.
+    """
+    company = state.get("company")
+    if not company:
+        return {"execution_logs": ["[SKIPPED] enrichment_company_node: Missing company payload."]}
+
+    temp_state = {
+        "companies": [company],
+        "execution_logs": [],
+        "institutional_markdown": [],
+    }
+    result = enrichment_node(temp_state)
+    enriched_companies = result.get("companies", [])
+    enriched_company = enriched_companies[0] if enriched_companies else company
+    corporate_csv_evidence = result.get("corporate_csv_evidence")
+    return {
+        "company": enriched_company,
+        "companies": [enriched_company],
+        "execution_logs": result.get("execution_logs", []),
+        "corporate_csv_evidence": [corporate_csv_evidence],
+    }
+
+
+async def institutional_company_node(state: dict):
+    """
+    Run institutional scraping for a single company by reusing the batch node.
+    """
+    company = state.get("company")
+    company_name = company.get("nome_empresa", "Unknown") if company else "Unknown"
+    if not company:
+        return {"execution_logs": ["[SKIPPED] institutional_company_node: Missing company payload."]}
+
+    temp_state = {
+        "companies": [company],
+        "execution_logs": [],
+        "institutional_markdown": [],
+    }
+    result = await institutional_scraping_node(temp_state)
+    markdown_list = result.get("institutional_markdown", [])
+    markdown = markdown_list[0] if markdown_list else None
+
+    summary = None
+    summary_logs = []
+    if markdown:
+        try:
+            enrichment_llm = get_enrichment_llm()
+            prompt_template = ChatPromptTemplate.from_messages(
+                [
+                    (
+                        "system",
+                        """You are a Corporate Intelligence Analyst. Your goal is to generate a structured 'Institutional Description' (Descrição Institucional) for a Brazilian company based on its web content.
+                        INSTRUCTIONS:
+                        1. Identify the core Business Model (B2B, B2C, Marketplace, etc.).
+                        2. Extract the primary products and services, normalizing different market terminologies into clear categories (e.g., convert 'gateway' or 'adquirência' into 'Payment Solutions').
+                        3. Define the Ideal Customer Profile (ICP) and the target industry/sector.
+                        4. If the text is insufficient, non-descriptive, or contains only legal/cookie warnings, return exactly: null.
+                        OUTPUT FORMAT:
+                        Provide a concise 3-sentence summary that covers: [Business Model] + [Core Products/Services] + [Target Audience/ICP]. Use professional, objective language.""",
+                    ),
+                    ("human", "Institutional markdown:\n{markdown}"),
+                ]
+            )
+            chain = prompt_template | enrichment_llm
+            llm_response = chain.invoke({"markdown": markdown})
+            summary_text = getattr(llm_response, "content", str(llm_response)).strip()
+            if summary_text and summary_text.lower() != "null":
+                summary = summary_text
+                summary_logs.append(f"[SUMMARY] {company_name}: {summary}")
+            else:
+                summary_logs.append(f"[SUMMARY] {company_name}: Not available")
+        except Exception as exc:
+            summary_logs.append(f"[SUMMARY] {company_name}: Failed ({exc})")
+    else:
+        summary_logs.append(f"[SUMMARY] {company_name}: Not available")
+    return {
+        "company": company,
+        "institutional_markdown": markdown_list,
+        "institutional_summary": [summary],
+        "execution_logs": result.get("execution_logs", []) + summary_logs,
+    }
+
 def get_enrichment_llm():
     """
     Instantiate the LLM only when first needed, avoiding import-time API key errors.
@@ -43,14 +138,14 @@ def limit_companies_node(state: GraphState):
     """
 
     print("--- NODE: Limit Companies ---")
-    source_companies = state.get("companies", [])
+    source_companies = state.get("company_queue", [])
     limited_companies = source_companies[:_MAX_COMPANIES]
     log_message = (
         f"Limited companies from {len(source_companies)} to {len(limited_companies)} for processing."
     )
 
     return {
-        "companies": limited_companies,
+        "company_queue": limited_companies,
         "execution_logs": [log_message],
     }
 
@@ -89,7 +184,7 @@ def ranking_scraper_node(state: GraphState):
             print(f"DEBUG: Sample company payload: {processed_data[10]}")
 
         return {
-            "companies": processed_data,
+            "company_queue": processed_data,
             "execution_logs": [f"Successfully scraped {len(processed_data)} companies."]
         }
 
@@ -641,8 +736,6 @@ async def institutional_scraping_node(state: GraphState):
                 if markdown:
                     markdown_results.append(markdown)
                     scraping_logs.append(f"✓ Institutional markdown captured for {company_name}")
-                    print(f"\n[INSTITUTIONAL MARKDOWN] {company_name}")
-                    print(markdown)
                 else:
                     markdown_results.append(None)
                     scraping_logs.append(f"✗ Institutional markdown empty for {company_name}")

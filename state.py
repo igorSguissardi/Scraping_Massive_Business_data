@@ -31,11 +31,26 @@ class GraphState(TypedDict):
     initial_url: str
     # Use annotated aggregator so enrichment stage preserves prior insight
     companies: Annotated[List[CompanyRecord], operator.add]
+    # Staged list for per-company fan-out processing
+    company_queue: List[CompanyRecord]
     # Apply annotated aggregator so audit trail remains cumulative
     execution_logs: Annotated[List[str], operator.add]
     # Track LLM API calls for cost auditing and rate limit management
     llm_request_count: int
     # Store CSV sniper results for corporate structure enrichment
-    corporate_csv_evidence: Optional[str]
+    corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
     # Store institutional content distilled into markdown
     institutional_markdown: Annotated[List[Optional[str]], operator.add]
+    # Store institutional page summaries per company
+    institutional_summary: Annotated[List[Optional[str]], operator.add]
+
+
+class CompanyState(TypedDict):
+    """
+    Define per-company state for fan-out processing.
+    """
+    company: CompanyRecord
+    execution_logs: Annotated[List[str], operator.add]
+    institutional_markdown: Annotated[List[Optional[str]], operator.add]
+    institutional_summary: Annotated[List[Optional[str]], operator.add]
+    corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]

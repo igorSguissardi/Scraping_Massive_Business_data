@@ -25,8 +25,11 @@ def main():
     initial_input = {
         "initial_url": "https://infovalorbucket.s3.amazonaws.com/arquivos/valor-1000/2025/ranking-das-1000-maiores/RankingValor10002025.json?0.39000846525186394",
         "companies": [],
+        "company_queue": [],
         "execution_logs": [],
-        "institutional_markdown": []
+        "institutional_markdown": [],
+        "institutional_summary": [],
+        "corporate_csv_evidence": [],
     }
     
     print("--- Starting Valor 1000 Intelligence Discovery ---")
