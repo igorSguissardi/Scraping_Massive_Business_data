@@ -2,6 +2,7 @@
 import asyncio
 import json
 import os
+import re
 import requests
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,7 +17,7 @@ from utils.neo4j_ingest import ingest_companies_batch
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
-_MAX_COMPANIES = 2
+_MAX_COMPANIES = 10
 NEO4J_BATCH_SIZE = int(os.getenv("NEO4J_BATCH_SIZE", "10"))
 
 
@@ -125,14 +126,24 @@ async def neo4j_ingest_node(state: GraphState):
     """
     companies = state.get("companies", [])
     ingested_ids = set(state.get("ingested_company_ids", []))
-    def _valid_cnpj(value: str) -> bool:
-        return isinstance(value, str) and len(value) == 14 and value.isdigit()
-    pending = [
-        company
-        for company in companies
-        if _valid_cnpj(company.get("primary_cnpj"))
-        and company.get("primary_cnpj") not in ingested_ids
-    ]
+    def _normalize_cnpj(value: str) -> str | None:
+        if value is None:
+            return None
+        text = re.sub(r"\D", "", str(value))
+        if len(text) != 14 or not text.isdigit():
+            return None
+        return text
+    pending = []
+    for company in companies:
+        normalized = _normalize_cnpj(company.get("primary_cnpj"))
+        if not normalized:
+            continue
+        if normalized in ingested_ids:
+            continue
+        if isinstance(company, dict) and company.get("primary_cnpj") != normalized:
+            company = dict(company)
+            company["primary_cnpj"] = normalized
+        pending.append(company)
 
     if not pending:
         if companies:
@@ -143,11 +154,14 @@ async def neo4j_ingest_node(state: GraphState):
             }
         return {}
 
-    total_expected = len(state.get("company_queue", []))
+    total_expected = len(state.get("company_queue") or [])
     total_ready = len(companies)
-    should_flush = len(pending) >= NEO4J_BATCH_SIZE or (
-        total_expected > 0 and total_ready >= total_expected
-    )
+    if total_expected == 0:
+        # Fall back when fan-out context is missing (e.g., single-company runs)
+        total_expected = total_ready
+    # In fan-out mode each branch only sees a subset, so flush immediately.
+    fanout_partial = total_expected > 0 and total_ready < total_expected
+    should_flush = fanout_partial or len(pending) >= NEO4J_BATCH_SIZE or total_ready >= total_expected
     if not should_flush:
         return {
             "execution_logs": [
@@ -831,7 +845,4 @@ async def institutional_scraping_node(state: GraphState):
         "institutional_markdown": markdown_results,
         "execution_logs": scraping_logs,
     }
-
-
-
 

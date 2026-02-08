@@ -172,7 +172,14 @@ def get_filtered_csv_data(target_cnpj: str, file_type: str) -> tuple[Optional[st
         # Filter to available columns (some may not exist)
         available_cols = [col for col in required_cols if col in filtered.columns]
         filtered_selected = filtered[available_cols]
-        
+
+        # Normalize ID columns to digit-only strings (preserve leading zeros)
+        for col in ("CNPJ_Companhia", "CPF_CNPJ_Acionista"):
+            if col in filtered_selected.columns:
+                filtered_selected[col] = (
+                    filtered_selected[col].astype(str).str.replace(r"\D", "", regex=True)
+                )
+
         # Convert to markdown table
         markdown_table = filtered_selected.to_markdown(index=False)
         return markdown_table, len(filtered_selected)

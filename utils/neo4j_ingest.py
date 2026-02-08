@@ -1,4 +1,5 @@
 import os
+import re
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -80,9 +81,9 @@ def _normalize_bool(value: Any) -> Optional[bool]:
 
 
 def _valid_cnpj(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
+    if value is None:
         return None
-    text = value.strip()
+    text = re.sub(r"\D", "", str(value))
     if len(text) != 14 or not text.isdigit():
         return None
     return text
@@ -106,6 +107,7 @@ def _build_payload(companies: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
                 "lucro_liquido_milhoes": company.get("lucro_liquido_milhoes"),
                 "official_website": company.get("official_website"),
                 "linkedin_url": company.get("linkedin_url"),
+                "physical_address": company.get("physical_address"),
                 "about_page_url": company.get("about_page_url"),
                 "institutional_description": company.get("institutional_description"),
                 "institutional_summary": company.get("institutional_summary"),
@@ -161,6 +163,7 @@ def ingest_companies_batch(companies: List[Dict[str, Any]]) -> List[str]:
         "c.lucro_liquido_milhoes = row.lucro_liquido_milhoes, "
         "c.official_website = row.official_website, "
         "c.linkedin_url = row.linkedin_url, "
+        "c.physical_address = row.physical_address, "
         "c.about_page_url = row.about_page_url, "
         "c.institutional_description = row.institutional_description, "
         "c.institutional_summary = row.institutional_summary, "

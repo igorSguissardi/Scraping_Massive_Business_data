@@ -18,6 +18,7 @@ class CompanyRecord(TypedDict, total=False):
     official_website: Optional[str]
     linkedin_url: Optional[str]
     about_page_url: Optional[str]
+    physical_address: Optional[str]
     institutional_description: Optional[str]
     institutional_summary: Optional[str]
     primary_cnpj: Optional[str]
