@@ -8,6 +8,7 @@ from nodes import (
     prepare_company_fanout,
     enrichment_company_node,
     institutional_company_node,
+    neo4j_ingest_node,
 )
 
 # Initialize the state machine with our shared state structure
@@ -17,6 +18,7 @@ workflow = StateGraph(GraphState)
 workflow.add_node("ranking_scraper", ranking_scraper_node)
 workflow.add_node("limit_companies", limit_companies_node)
 workflow.add_node("prepare_fanout", prepare_company_fanout)
+workflow.add_node("neo4j_ingest", neo4j_ingest_node)
 
 # Per-company subgraph
 company_workflow = StateGraph(CompanyState)
@@ -51,7 +53,9 @@ def dispatch_companies(state: GraphState):
 
 workflow.add_conditional_edges("prepare_fanout", dispatch_companies)
 workflow.add_edge("prepare_fanout", END)
+workflow.add_edge("company_pipeline", "neo4j_ingest")
 workflow.add_edge("company_pipeline", END)
+workflow.add_edge("neo4j_ingest", END)
 
 # Compile the graph into an executable application
 app = workflow.compile()

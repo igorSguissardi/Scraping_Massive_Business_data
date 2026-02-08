@@ -30,6 +30,7 @@ def main():
         "institutional_markdown": [],
         "institutional_summary": [],
         "corporate_csv_evidence": [],
+        "ingested_company_ids": [],
     }
     
     print("--- Starting Valor 1000 Intelligence Discovery ---")

@@ -18,9 +18,12 @@ class CompanyRecord(TypedDict, total=False):
     official_website: Optional[str]
     linkedin_url: Optional[str]
     about_page_url: Optional[str]
+    institutional_description: Optional[str]
+    institutional_summary: Optional[str]
     primary_cnpj: Optional[str]
     found_brands: List[str]
     corporate_group_notes: Optional[str]
+    relationships: List[dict]
 
 
 class GraphState(TypedDict):
@@ -43,12 +46,15 @@ class GraphState(TypedDict):
     institutional_markdown: Annotated[List[Optional[str]], operator.add]
     # Store institutional page summaries per company
     institutional_summary: Annotated[List[Optional[str]], operator.add]
+    # Track which companies have been ingested into Neo4j
+    ingested_company_ids: Annotated[List[str], operator.add]
 
 
 class CompanyState(TypedDict):
     """
     Define per-company state for fan-out processing.
     """
+    companies: Annotated[List[CompanyRecord], operator.add]
     company: CompanyRecord
     execution_logs: Annotated[List[str], operator.add]
     institutional_markdown: Annotated[List[Optional[str]], operator.add]

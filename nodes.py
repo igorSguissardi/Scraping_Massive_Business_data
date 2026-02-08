@@ -12,10 +12,12 @@ import html2text
 from state import GraphState
 from utils.parser import parse_valor_1000_json
 from utils.tools import get_search_query, search_company_web_presence, get_filtered_csv_data
+from utils.neo4j_ingest import ingest_companies_batch
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
 _MAX_COMPANIES = 2
+NEO4J_BATCH_SIZE = int(os.getenv("NEO4J_BATCH_SIZE", "10"))
 
 
 def prepare_company_fanout(state: GraphState):
@@ -105,12 +107,69 @@ async def institutional_company_node(state: dict):
             summary_logs.append(f"[SUMMARY] {company_name}: Failed ({exc})")
     else:
         summary_logs.append(f"[SUMMARY] {company_name}: Not available")
+
+    if isinstance(company, dict):
+        company["institutional_summary"] = summary
     return {
         "company": company,
+        "companies": [company],
         "institutional_markdown": markdown_list,
         "institutional_summary": [summary],
         "execution_logs": result.get("execution_logs", []) + summary_logs,
     }
+
+
+async def neo4j_ingest_node(state: GraphState):
+    """
+    Batch-ingest enriched companies into Neo4j using UNWIND.
+    """
+    companies = state.get("companies", [])
+    ingested_ids = set(state.get("ingested_company_ids", []))
+    def _valid_cnpj(value: str) -> bool:
+        return isinstance(value, str) and len(value) == 14 and value.isdigit()
+    pending = [
+        company
+        for company in companies
+        if _valid_cnpj(company.get("primary_cnpj"))
+        and company.get("primary_cnpj") not in ingested_ids
+    ]
+
+    if not pending:
+        if companies:
+            return {
+                "execution_logs": [
+                    f"[NEO4J] Skipped ingestion: 0 pending with valid 14-digit CNPJ out of {len(companies)} companies."
+                ]
+            }
+        return {}
+
+    total_expected = len(state.get("company_queue", []))
+    total_ready = len(companies)
+    should_flush = len(pending) >= NEO4J_BATCH_SIZE or (
+        total_expected > 0 and total_ready >= total_expected
+    )
+    if not should_flush:
+        return {
+            "execution_logs": [
+                f"[NEO4J] Waiting for more companies (ready {total_ready}/{total_expected}, pending {len(pending)})."
+            ]
+        }
+
+    batch = pending[:NEO4J_BATCH_SIZE] if len(pending) >= NEO4J_BATCH_SIZE else pending
+    try:
+        ingested = await asyncio.to_thread(ingest_companies_batch, batch)
+        if not ingested:
+            print("[NEO4J] No valid company IDs to ingest in this batch.")
+            return {"execution_logs": ["[NEO4J] No valid company IDs to ingest in this batch."]}
+        print(f"[NEO4J] Ingested batch of {len(ingested)} companies.")
+        return {
+            "ingested_company_ids": ingested,
+            "execution_logs": [f"[NEO4J] Ingested batch of {len(ingested)} companies."],
+        }
+    except Exception as exc:
+        print(f"[NEO4J] Batch ingestion failed: {exc}")
+        return {"execution_logs": [f"[NEO4J] Batch ingestion failed: {exc}"]}
+
 
 def get_enrichment_llm():
     """
@@ -322,13 +381,19 @@ def enrichment_node(state: GraphState):
             "4. primary_cnpj: Extract the full 14-digit Brazilian CNPJ. Clean it of any formatting (dots, slashes).\n"
             "5. radical_cnpj: This is the first 8 digits of the primary_cnpj. Extract it only if a valid CNPJ is found.\n"
             "6. about_page_url: Extract the specific URL that leads to the 'About Us', 'Quem Somos', 'sobre nos', 'História' or similar institutional page.\n"
+            "7. institutional_description: Provide a brief institutional description if clearly stated in the evidence; otherwise return null.\n"
 
             "Rules:\n"
             "- If evidence for any field is missing or inconclusive, return null.\n"
             "- Do not hallucinate or guess data points.\n"
             "- Output must be strictly a single JSON object with the following keys: "
             "official_website (string/null), linkedin_url (string/null), physical_address (string/null), "
-            "primary_cnpj (string/null), radical_cnpj (string/null), about_page_url (string/null)."
+            "primary_cnpj (string/null), radical_cnpj (string/null), about_page_url (string/null), "
+            "institutional_description (string/null).\n"
+            "FINAL VALIDATION STEP: Before outputting the JSON, perform a silent self-check on the following:\n"
+            "ID Length: Ensure primary_cnpj has exactly 14 digits and radical_cnpj has exactly 8 digits. Do not strip leading zeros.\n"
+            "JSON Schema: Ensure the keys official_website, linkedin_url, about_page_url, and institutional_description are all present. Use null if data is missing.\n"
+            "If you detect a formatting error, fix it before returning the final object. Your output must be STRICT JSON ONLY."
         )
 
         # Use LLM decision because snippet context prioritizes official domain over SEO noise
@@ -447,6 +512,17 @@ def enrichment_node(state: GraphState):
             print(f"     ✗ about_page_url: Not found")
             enrichment_logs.append(f"   ✗ about_page_url: Not determined")
 
+        # Extract and validate institutional_description
+        institutional_description = parsed_output.get("institutional_description")
+        if isinstance(institutional_description, str) and institutional_description.strip():
+            company_copy["institutional_description"] = institutional_description.strip()
+            print("     ✓ institutional_description: Captured")
+            enrichment_logs.append("   ✓ institutional_description: Captured")
+        else:
+            company_copy["institutional_description"] = None
+            print("     ✗ institutional_description: Not found")
+            enrichment_logs.append("   ✗ institutional_description: Not determined")
+
         # ===== CHECK IF COMPANY QUALIFIES FOR DEEP SEARCH (After Phase 1 extraction) =====
         # Criteria: High-value sectors (Holding, Petróleo, Finanças) or Revenue > 5000 million R$
         high_priority_keywords = ["Holding", "Petróleo", "Finanças"]
@@ -557,7 +633,10 @@ def enrichment_node(state: GraphState):
                     "RULES:\n"
                     "- DO NOT hallucinate. Use only the provided business structure data\n"
                     "- Preserve exact shareholder names for Neo4j node matching.\n"
-                    "- If no relationships are found, return 'relationships': []."
+                    "- If no relationships are found, return 'relationships': [].\n"
+                    "FINAL VALIDATION STEP: Before outputting the JSON, perform a silent self-check on the following:\n"
+                    "Relationship Logic: Verify that every object in the relationships array has both a source_id and a target_id.\n"
+                    "If you detect a formatting error, fix it before returning the final object. Your output must be STRICT JSON ONLY."
                     )
                 
                 # ===== DEBUG: Log Phase 2 Prompt Content =====
@@ -651,6 +730,7 @@ def enrichment_node(state: GraphState):
                 # Extract relationships from Phase 2
                 relationships = parsed_output_phase2.get("relationships", [])
                 if isinstance(relationships, list) and relationships:
+                    company_copy["relationships"] = relationships
                     print(f"     ✓ relationships: {len(relationships)} relationships found")
                     print(f"\n  [RELATIONSHIPS EXTRACTED]:")
                     print(f"  ─────────────────────────────────────────────────────────────────")
@@ -658,13 +738,14 @@ def enrichment_node(state: GraphState):
                     print(f"  ─────────────────────────────────────────────────────────────────\n")
                     enrichment_logs.append(f"   ✓ relationships: {len(relationships)} relationships found")
                 else:
+                    company_copy["relationships"] = []
                     print(f"     ✗ relationships: No relationships found")
                     enrichment_logs.append(f"   ✗ relationships: Empty")
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
             company_copy["found_brands"] = []
-
+            company_copy["relationships"] = []
         enriched_companies.append(company_copy)
         processed_count += 1
 
@@ -750,3 +831,7 @@ async def institutional_scraping_node(state: GraphState):
         "institutional_markdown": markdown_results,
         "execution_logs": scraping_logs,
     }
+
+
+
+
