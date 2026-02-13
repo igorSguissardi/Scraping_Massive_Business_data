@@ -113,6 +113,7 @@ def _build_payload(companies: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]
                 "institutional_summary": company.get("institutional_summary"),
                 "corporate_group_notes": company.get("corporate_group_notes"),
                 "brands": company.get("found_brands") or [],
+                "origin_company": bool(company.get("origin_company")),
             }
         )
 
@@ -168,6 +169,7 @@ def ingest_companies_batch(companies: List[Dict[str, Any]]) -> List[str]:
         "c.institutional_description = row.institutional_description, "
         "c.institutional_summary = row.institutional_summary, "
         "c.corporate_group_notes = row.corporate_group_notes "
+        "FOREACH (_ IN CASE WHEN row.origin_company THEN [1] ELSE [] END | SET c:OriginCompany) "
         "WITH c, row "
         "UNWIND row.brands AS brand_name "
         "MERGE (b:Brand {name: brand_name}) "

@@ -268,6 +268,9 @@ def ranking_scraper_node(state: GraphState):
         processed_data = parse_valor_1000_json(raw_json)
 
         if processed_data:
+            for company in processed_data:
+                if isinstance(company, dict):
+                    company.setdefault("origin_company", True)
             print(f"DEBUG: Sample company payload: {processed_data[10]}")
 
         return {

@@ -25,6 +25,7 @@ class CompanyRecord(TypedDict, total=False):
     found_brands: List[str]
     corporate_group_notes: Optional[str]
     relationships: List[dict]
+    origin_company: Optional[bool]
 
 
 class GraphState(TypedDict):
