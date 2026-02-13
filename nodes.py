@@ -134,16 +134,20 @@ async def neo4j_ingest_node(state: GraphState):
             return None
         return text
     pending = []
+    seen_ids = set()
     for company in companies:
         normalized = _normalize_cnpj(company.get("primary_cnpj"))
         if not normalized:
             continue
         if normalized in ingested_ids:
             continue
+        if normalized in seen_ids:
+            continue
         if isinstance(company, dict) and company.get("primary_cnpj") != normalized:
             company = dict(company)
             company["primary_cnpj"] = normalized
         pending.append(company)
+        seen_ids.add(normalized)
 
     if not pending:
         if companies:
@@ -169,16 +173,26 @@ async def neo4j_ingest_node(state: GraphState):
             ]
         }
 
-    batch = pending[:NEO4J_BATCH_SIZE] if len(pending) >= NEO4J_BATCH_SIZE else pending
     try:
-        ingested = await asyncio.to_thread(ingest_companies_batch, batch)
-        if not ingested:
-            print("[NEO4J] No valid company IDs to ingest in this batch.")
-            return {"execution_logs": ["[NEO4J] No valid company IDs to ingest in this batch."]}
-        print(f"[NEO4J] Ingested batch of {len(ingested)} companies.")
+        all_ingested = []
+        batch_count = 0
+        offset = 0
+        while offset < len(pending):
+            batch = pending[offset : offset + NEO4J_BATCH_SIZE]
+            ingested = await asyncio.to_thread(ingest_companies_batch, batch)
+            if not ingested:
+                print("[NEO4J] No valid company IDs to ingest in this batch.")
+                if not all_ingested:
+                    return {"execution_logs": ["[NEO4J] No valid company IDs to ingest in this batch."]}
+                break
+            batch_count += 1
+            all_ingested.extend(ingested)
+            ingested_ids.update(ingested)
+            offset += len(batch)
+        print(f"[NEO4J] Ingested {len(all_ingested)} companies in {batch_count} batch(es).")
         return {
-            "ingested_company_ids": ingested,
-            "execution_logs": [f"[NEO4J] Ingested batch of {len(ingested)} companies."],
+            "ingested_company_ids": all_ingested,
+            "execution_logs": [f"[NEO4J] Ingested {len(all_ingested)} companies in {batch_count} batch(es)."],
         }
     except Exception as exc:
         print(f"[NEO4J] Batch ingestion failed: {exc}")
@@ -845,4 +859,3 @@ async def institutional_scraping_node(state: GraphState):
         "institutional_markdown": markdown_results,
         "execution_logs": scraping_logs,
     }
-
