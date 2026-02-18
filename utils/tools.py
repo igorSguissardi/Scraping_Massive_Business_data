@@ -154,7 +154,16 @@ class _CSVCache:
             try:
                 path = _ensure_fre_csv("fre_cia_aberta_posicao_acionaria_2025.csv")
                 # Load with proper encoding and separator (ISO-8859-1 for Brazilian CSV files)
-                df = pd.read_csv(path, sep=";", encoding="latin1")
+                # Use converters to preserve leading zeros in identity columns.
+                df = pd.read_csv(
+                    path,
+                    sep=";",
+                    encoding="latin1",
+                    converters={
+                        "CNPJ_Companhia": str,
+                        "CPF_CNPJ_Acionista": str,
+                    },
+                )
                 self._dataframes[key] = df
                 print(f"[CACHE] Loaded shareholding CSV (fre_cia_aberta_posicao_acionaria_2025.csv): {len(df)} rows")
             except Exception as e:
@@ -268,6 +277,121 @@ def get_filtered_csv_data(target_cnpj: str, file_type: str) -> tuple[Optional[st
     else:
         print(f"[WARNING] Unknown file_type: {file_type}. Expected 'shareholding' or 'governance'")
         return None, 0
+
+
+def _normalize_percentage_value(value) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return None
+    if "," in text and "." in text:
+        text = text.replace(".", "").replace(",", ".")
+    elif "," in text:
+        text = text.replace(",", ".")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def get_shareholding_owns_relationships(target_cnpj: str) -> tuple[List[Dict], Optional[str], int]:
+    """
+    Deterministically build :OWNS relationships for a target company from CVM shareholding CSV.
+
+    Returns:
+        (relationships, corporate_group_notes, row_count)
+    """
+    if not target_cnpj or not str(target_cnpj).strip():
+        return [], None, 0
+
+    normalized_target = clean_cnpj(target_cnpj)
+    if len(normalized_target) != 14:
+        return [], None, 0
+
+    cache = _CSVCache()
+    df = cache.get_shareholding()
+    if df is None or df.empty:
+        return [], None, 0
+
+    if "CNPJ_Companhia" not in df.columns:
+        return [], None, 0
+
+    df_normalized = df.copy()
+    df_normalized["CNPJ_Normalized"] = df_normalized["CNPJ_Companhia"].apply(clean_cnpj)
+    filtered = df_normalized[df_normalized["CNPJ_Normalized"] == normalized_target]
+    if filtered.empty:
+        return [], None, 0
+
+    rel_by_source: Dict[str, Dict] = {}
+    for _, row in filtered.iterrows():
+        shareholder_id = clean_cnpj(row.get("CPF_CNPJ_Acionista"))
+        if len(shareholder_id) == 11:
+            source_label = "Person"
+        elif len(shareholder_id) == 14:
+            source_label = "Company"
+        else:
+            continue
+
+        shareholder_name = str(row.get("Acionista") or "").strip() or None
+        percentage_raw = row.get("Percentual_Total_Acoes_Circulacao")
+        is_controller_raw = str(row.get("Acionista_Controlador") or "").strip().upper()
+        is_controller = True if is_controller_raw == "S" else False
+
+        existing = rel_by_source.get(shareholder_id)
+        if existing is None:
+            rel_by_source[shareholder_id] = {
+                "source_id": shareholder_id,
+                "source_name": shareholder_name,
+                "source_label": source_label,
+                "target_id": normalized_target,
+                "relationship_type": "OWNS",
+                "properties": {
+                    "percentage": percentage_raw,
+                    "is_controller": is_controller,
+                },
+            }
+            continue
+
+        # Deduplicate by keeping the strongest signal for controller and max percentage.
+        if existing.get("source_name") is None and shareholder_name:
+            existing["source_name"] = shareholder_name
+        if existing.get("source_label") != source_label:
+            existing["source_label"] = source_label
+
+        existing_props = existing.get("properties") or {}
+        existing_props["is_controller"] = bool(existing_props.get("is_controller")) or is_controller
+
+        existing_pct = _normalize_percentage_value(existing_props.get("percentage"))
+        new_pct = _normalize_percentage_value(percentage_raw)
+        if new_pct is not None and (existing_pct is None or new_pct > existing_pct):
+            existing_props["percentage"] = percentage_raw
+        existing["properties"] = existing_props
+
+    relationships = list(rel_by_source.values())
+
+    controllers = []
+    for rel in relationships:
+        if rel.get("source_label") != "Company":
+            continue
+        props = rel.get("properties") or {}
+        pct = _normalize_percentage_value(props.get("percentage"))
+        if props.get("is_controller") is True or (pct is not None and pct > 50.0):
+            controllers.append(rel)
+
+    corporate_group_notes = None
+    if controllers:
+        first = controllers[0]
+        name = first.get("source_name") or "Unknown"
+        corporate_group_notes = f"Controlled by {name}"
+        if len(controllers) > 1:
+            corporate_group_notes = f"{corporate_group_notes} (+{len(controllers)-1} other controller(s))"
+    elif relationships:
+        corporate_group_notes = "Independent company"
+
+    return relationships, corporate_group_notes, len(filtered)
 
 
 def get_search_query(nome_empresa: str, sede: str, search_type: str) -> str:

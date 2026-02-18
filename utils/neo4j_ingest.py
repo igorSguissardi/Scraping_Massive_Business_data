@@ -184,32 +184,54 @@ def ingest_companies_batch(companies: List[Dict[str, Any]]) -> List[str]:
         "FOREACH (_ IN CASE WHEN rel.source_label = 'Person' THEN [1] ELSE [] END | "
         "  MERGE (source:Person {cpf: rel.source_id}) "
         "  SET source.name = rel.source_name "
-        "  FOREACH (__ IN CASE WHEN rel.relationship_type = 'SUBSIDIARY_OF' THEN [1] ELSE [] END | "
-        "    MERGE (source)-[r:SUBSIDIARY_OF]->(target) "
-        "    SET r.percentage = rel.percentage "
-        "  ) "
-        "  FOREACH (__ IN CASE WHEN rel.relationship_type = 'OWNS' THEN [1] ELSE [] END | "
-        "    MERGE (source)-[r:OWNS]->(target) "
-        "    SET r.percentage = rel.percentage, r.is_controller = rel.is_controller "
-        "  ) "
+        "  MERGE (source)-[r:OWNS]->(target) "
+        "  SET r.percentage = rel.percentage, r.is_controller = rel.is_controller "
         ") "
         "FOREACH (_ IN CASE WHEN rel.source_label <> 'Person' THEN [1] ELSE [] END | "
         "  MERGE (source:Company {cnpj: rel.source_id}) "
         "  SET source.name = rel.source_name "
-        "  FOREACH (__ IN CASE WHEN rel.relationship_type = 'SUBSIDIARY_OF' THEN [1] ELSE [] END | "
-        "    MERGE (source)-[r:SUBSIDIARY_OF]->(target) "
-        "    SET r.percentage = rel.percentage "
-        "  ) "
-        "  FOREACH (__ IN CASE WHEN rel.relationship_type = 'OWNS' THEN [1] ELSE [] END | "
-        "    MERGE (source)-[r:OWNS]->(target) "
-        "    SET r.percentage = rel.percentage, r.is_controller = rel.is_controller "
-        "  ) "
+        "  MERGE (source)-[r:OWNS]->(target) "
+        "  SET r.percentage = rel.percentage, r.is_controller = rel.is_controller "
         ")"
     )
 
+    # Derive SUBSIDIARY_OF deterministically from OWNS.
+    subsidiary_create_query = (
+        "MATCH (parent:Company)-[o:OWNS]->(child:Company) "
+        "WHERE coalesce(o.is_controller, false) = true OR coalesce(o.percentage, 0) > 50.0 "
+        "MERGE (child)-[s:SUBSIDIARY_OF]->(parent) "
+        "SET s.percentage = o.percentage"
+    )
+    subsidiary_cleanup_query = (
+        "MATCH (child:Company)-[s:SUBSIDIARY_OF]->(parent:Company) "
+        "OPTIONAL MATCH (parent)-[o:OWNS]->(child) "
+        "WITH s, o "
+        "WHERE o IS NULL OR NOT (coalesce(o.is_controller, false) = true OR coalesce(o.percentage, 0) > 50.0) "
+        "DELETE s"
+    )
+
     with driver.session(database=database) as session:
-        session.run(company_query, companies=company_rows)
+        session.run(company_query, companies=company_rows).consume()
         if relationship_rows:
-            session.run(relationship_query, relationships=relationship_rows)
+            summary = session.run(relationship_query, relationships=relationship_rows).consume()
+            counters = summary.counters
+            print(
+                "[NEO4J] OWNS upsert counters: "
+                f"nodes_created={counters.nodes_created}, "
+                f"relationships_created={counters.relationships_created}, "
+                f"properties_set={counters.properties_set}"
+            )
+
+            summary = session.run(subsidiary_create_query).consume()
+            counters = summary.counters
+            print(
+                "[NEO4J] SUBSIDIARY_OF create counters: "
+                f"relationships_created={counters.relationships_created}, "
+                f"properties_set={counters.properties_set}"
+            )
+
+            summary = session.run(subsidiary_cleanup_query).consume()
+            counters = summary.counters
+            print(f"[NEO4J] SUBSIDIARY_OF cleanup counters: relationships_deleted={counters.relationships_deleted}")
 
     return ingested_ids

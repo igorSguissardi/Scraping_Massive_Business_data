@@ -12,7 +12,12 @@ import html2text
 
 from state import GraphState
 from utils.parser import parse_valor_1000_json
-from utils.tools import get_search_query, search_company_web_presence, get_filtered_csv_data
+from utils.tools import (
+    get_search_query,
+    search_company_web_presence,
+    get_filtered_csv_data,
+    get_shareholding_owns_relationships,
+)
 from utils.neo4j_ingest import ingest_companies_batch
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
@@ -608,7 +613,8 @@ def enrichment_node(state: GraphState):
             else:
                 enrichment_logs.append(f"   ✗ Sniper: No records found for CNPJ {primary_cnpj}")
             
-            if deep_search_content:
+            # this function is not being called in the current flow, because it was implemented a deterministic algoritm code to handle the relationship extraction;
+            if False and deep_search_content:
                 print(f"  └─ [PHASE 2] Analyzing corporate structure data for Neo4j fields...")
                 
                 system_directive_phase2 = (
@@ -772,6 +778,13 @@ def enrichment_node(state: GraphState):
                     company_copy["relationships"] = []
                     print(f"     ✗ relationships: No relationships found")
                     enrichment_logs.append(f"   ✗ relationships: Empty")
+
+            owns_relationships, corporate_group_notes, _ = get_shareholding_owns_relationships(primary_cnpj)
+            company_copy["corporate_group_notes"] = corporate_group_notes
+            # Brand extraction was previously LLM-based; keep deterministic output.
+            company_copy["found_brands"] = []
+            company_copy["relationships"] = owns_relationships
+            enrichment_logs.append(f"   [DETERMINISTIC] OWNS relationships: {len(owns_relationships)}")
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
