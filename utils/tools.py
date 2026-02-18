@@ -28,6 +28,23 @@ _LOG_LOCK = threading.Lock()
 _LOG_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../logs"))
 
 
+def clear_run_logs() -> None:
+    """
+    Clear log directory for new run.
+    """
+    os.makedirs(_LOG_DIR, exist_ok=True)
+    removed_count = 0
+    for entry in os.listdir(_LOG_DIR):
+        path = os.path.join(_LOG_DIR, entry)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed_count += 1
+        except OSError:
+            continue
+    print(f"[LOG] Cleared {removed_count} log file(s) from log directory.")
+
+
 def _is_valid_zip(path: str) -> bool:
     """Return True when the ZIP file exists and passes integrity checks."""
     if not os.path.exists(path):

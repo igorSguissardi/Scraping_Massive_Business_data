@@ -20,6 +20,7 @@ else:
     print("[DEBUG] ✗ OPENAI_API_KEY not found after load_dotenv()")
 
 from graph import app
+from utils.tools import clear_run_logs
 
 def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge
@@ -36,6 +37,7 @@ def main():
     }
     
     print("--- Starting Valor 1000 Intelligence Discovery ---")
+    clear_run_logs()
     
     # Run the graph and capture the final state
     run_start = time.perf_counter()
