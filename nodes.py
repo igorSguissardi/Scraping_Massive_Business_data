@@ -61,7 +61,6 @@ def enrichment_company_node(state: dict):
     llm_request_count = result.get("llm_request_count", 0)
     return {
         "company": enriched_company,
-        "companies": [enriched_company],
         "execution_logs": result.get("execution_logs", []),
         "corporate_csv_evidence": [corporate_csv_evidence],
         "llm_request_count": llm_request_count,
