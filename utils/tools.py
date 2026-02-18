@@ -25,6 +25,49 @@ _FRE_ZIP_PATH = os.path.join(_FRE_DIR, "fre_cia_aberta_2025.zip")
 _FRE_LOCK = threading.Lock()
 
 
+def _is_valid_zip(path: str) -> bool:
+    """Return True when the ZIP file exists and passes integrity checks."""
+    if not os.path.exists(path):
+        return False
+    try:
+        with zipfile.ZipFile(path, "r") as zip_file:
+            bad_file = zip_file.testzip()
+            if bad_file is not None:
+                print(f"[ERROR] Invalid ZIP: {path} (bad file: {bad_file})")
+                return False
+    except zipfile.BadZipFile as exc:
+        print(f"[ERROR] Invalid ZIP: {path} ({exc})")
+        return False
+    except Exception as exc:
+        print(f"[ERROR] Failed to read ZIP: {path} ({exc})")
+        return False
+    return True
+
+
+def _download_fre_zip() -> None:
+    """Download the FRE ZIP to a temp file, validate it, and move into place."""
+    os.makedirs(_FRE_DIR, exist_ok=True)
+    temp_path = f"{_FRE_ZIP_PATH}.part"
+    if os.path.exists(temp_path):
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+    print(f"[CACHE] Downloading FRE ZIP from CVM: {_FRE_ZIP_URL}")
+    with requests.get(_FRE_ZIP_URL, stream=True, timeout=120) as response:
+        response.raise_for_status()
+        with open(temp_path, "wb") as handle:
+            for chunk in response.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    handle.write(chunk)
+    if not _is_valid_zip(temp_path):
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise ValueError("Downloaded FRE ZIP is invalid.")
+    os.replace(temp_path, _FRE_ZIP_PATH)
+    print(f"[CACHE] Downloaded FRE ZIP to {_FRE_ZIP_PATH}")
+
+
 def _ensure_fre_csv(file_name: str) -> str:
     """
     Ensure the requested FRE CSV exists locally.
@@ -36,19 +79,29 @@ def _ensure_fre_csv(file_name: str) -> str:
     csv_path = os.path.join(_FRE_DIR, file_name)
 
     if os.path.exists(csv_path):
-        return csv_path
+        if os.path.getsize(csv_path) > 0:
+            return csv_path
+        try:
+            os.remove(csv_path)
+        except OSError:
+            pass
 
     with _FRE_LOCK:
         if os.path.exists(csv_path):
-            return csv_path
+            if os.path.getsize(csv_path) > 0:
+                return csv_path
+            try:
+                os.remove(csv_path)
+            except OSError:
+                pass
 
-        if not os.path.exists(_FRE_ZIP_PATH):
-            with requests.get(_FRE_ZIP_URL, stream=True, timeout=120) as response:
-                response.raise_for_status()
-                with open(_FRE_ZIP_PATH, "wb") as handle:
-                    for chunk in response.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            handle.write(chunk)
+        if not _is_valid_zip(_FRE_ZIP_PATH):
+            if os.path.exists(_FRE_ZIP_PATH):
+                try:
+                    os.remove(_FRE_ZIP_PATH)
+                except OSError:
+                    pass
+            _download_fre_zip()
 
         with zipfile.ZipFile(_FRE_ZIP_PATH, "r") as zip_file:
             candidate = None
@@ -63,6 +116,8 @@ def _ensure_fre_csv(file_name: str) -> str:
             extracted_path = os.path.join(_FRE_DIR, candidate)
             if extracted_path != csv_path:
                 os.replace(extracted_path, csv_path)
+            if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+                raise FileNotFoundError(f"CSV '{file_name}' extraction failed: {csv_path}")
 
     return csv_path
 
@@ -338,4 +393,3 @@ async def fetch_corporate_structure_legacy(cnpj: str) -> Optional[str]:
     except Exception:
         # Gracefully handle any parsing or request errors
         return None
-
