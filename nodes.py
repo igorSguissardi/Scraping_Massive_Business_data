@@ -20,6 +20,7 @@ from utils.tools import (
     build_cnpj_retry_queries,
     has_cnpj_in_results,
     merge_search_results,
+    log_company_event,
 )
 from utils.neo4j_ingest import ingest_companies_batch
 
@@ -85,6 +86,7 @@ async def institutional_company_node(state: dict):
 
     summary = None
     summary_logs = []
+    node_label = "institutional_summary"
     if markdown:
         try:
             enrichment_llm = get_enrichment_llm()
@@ -109,13 +111,37 @@ async def institutional_company_node(state: dict):
             summary_text = getattr(llm_response, "content", str(llm_response)).strip()
             if summary_text and summary_text.lower() != "null":
                 summary = summary_text
-                summary_logs.append(f"[SUMMARY] {company_name}: {summary}")
+                log_company_event(
+                    company,
+                    node_label,
+                    f"[SUMMARY] {company_name}: {summary}",
+                    execution_logs=summary_logs,
+                    also_print=True,
+                )
             else:
-                summary_logs.append(f"[SUMMARY] {company_name}: Not available")
+                log_company_event(
+                    company,
+                    node_label,
+                    f"[SUMMARY] {company_name}: Not available",
+                    execution_logs=summary_logs,
+                    also_print=True,
+                )
         except Exception as exc:
-            summary_logs.append(f"[SUMMARY] {company_name}: Failed ({exc})")
+            log_company_event(
+                company,
+                node_label,
+                f"[SUMMARY] {company_name}: Failed ({exc})",
+                execution_logs=summary_logs,
+                also_print=True,
+            )
     else:
-        summary_logs.append(f"[SUMMARY] {company_name}: Not available")
+        log_company_event(
+            company,
+            node_label,
+            f"[SUMMARY] {company_name}: Not available",
+            execution_logs=summary_logs,
+            also_print=True,
+        )
 
     if isinstance(company, dict):
         company["institutional_summary"] = summary
@@ -314,60 +340,99 @@ def enrichment_node(state: GraphState):
         company_copy = dict(company)
         company_name = company_copy.get("nome_empresa", "").strip()
         city = company_copy.get("sede", "").strip()
+        node_label = "enrichment"
 
         if not company_name:
             # Skip entry because missing name blocks precise search
+            log_company_event(
+                company_copy,
+                node_label,
+                f"[SKIPPED] Company #{index+1}: Missing nome_empresa",
+                execution_logs=enrichment_logs,
+            )
             enriched_companies.append(company_copy)
-            enrichment_logs.append(f"[SKIPPED] Company #{index+1}: Missing nome_empresa")
             continue
 
-        # Log company being processed
-        print(f"\n[SEARCH #{index+1}] {company_name} ({city})")
-        enrichment_logs.append(f"Processing company #{index+1}: {company_name} | sede: {city} | setor: {company_copy.get('setor', 'N/A')}")
+        log_company_event(
+            company_copy,
+            node_label,
+            f"[SEARCH #{index+1}] {company_name} ({city})",
+            execution_logs=enrichment_logs,
+        )
+        log_company_event(
+            company_copy,
+            node_label,
+            (
+                f"Processing company #{index+1}: {company_name} | sede: {city} | setor: "
+                f"{company_copy.get('setor', 'N/A')}"
+            ),
+            execution_logs=enrichment_logs,
+            also_print=False,
+        )
 
         site_query = get_search_query(company_name, city, "site")
         site_results = search_company_web_presence(site_query)
-        print(f"  └─ Official site Query: '{site_query}'")
-        print(f"     Results: {len(site_results)} found")
+        log_company_event(company_copy, node_label, f"Official site Query: '{site_query}'", also_print=True)
+        log_company_event(company_copy, node_label, f"Results: {len(site_results)} found", also_print=True)
 
         cnpj_query = get_search_query(company_name, city, "cnpj")
         cnpj_results = search_company_web_presence(cnpj_query)
-        print(f"  └─ CNPJ Query: '{cnpj_query}'")
-        print(f"     Results: {len(cnpj_results)} found")
+        log_company_event(company_copy, node_label, f"CNPJ Query: '{cnpj_query}'", also_print=True)
+        log_company_event(company_copy, node_label, f"Results: {len(cnpj_results)} found", also_print=True)
 
         linkedin_query = get_search_query(company_name, city, "linkedin")
         linkedin_results = search_company_web_presence(linkedin_query)
-        print(f"  └─ Linkedin Query: '{linkedin_query}'")
-        print(f"     Results: {len(linkedin_results)} found")
+        log_company_event(company_copy, node_label, f"Linkedin Query: '{linkedin_query}'", also_print=True)
+        log_company_event(company_copy, node_label, f"Results: {len(linkedin_results)} found", also_print=True)
 
         address_query = get_search_query(company_name, city, "address")
         address_results = search_company_web_presence(address_query)
-        print(f"  └─ Adress Query: '{address_query}'")
-        print(f"     Results: {len(address_results)} found")
+        log_company_event(company_copy, node_label, f"Adress Query: '{address_query}'", also_print=True)
+        log_company_event(company_copy, node_label, f"Results: {len(address_results)} found", also_print=True)
 
         about_query = f"{company_name} Sobre"
         about_results = search_company_web_presence(about_query)
-        print(f"  └─ About Query: '{about_query}'")
-        print(f"     Results: {len(about_results)} found")
+        log_company_event(company_copy, node_label, f"About Query: '{about_query}'", also_print=True)
+        log_company_event(company_copy, node_label, f"Results: {len(about_results)} found", also_print=True)
 
         should_retry_cnpj = not cnpj_results or not has_cnpj_in_results(cnpj_results)
         if should_retry_cnpj:
             cnpj_retry_queries = build_cnpj_retry_queries(company_name, city)
             cnpj_retry_results = []
             if cnpj_retry_queries:
-                print("  └─ CNPJ Retry: Triggered")
+                log_company_event(company_copy, node_label, "CNPJ Retry: Triggered", also_print=True)
                 for retry_query in cnpj_retry_queries:
                     retry_results = search_company_web_presence(retry_query)
-                    print(f"  └─ CNPJ Retry Query: '{retry_query}'")
-                    print(f"     Results: {len(retry_results)} found")
+                    log_company_event(
+                        company_copy,
+                        node_label,
+                        f"CNPJ Retry Query: '{retry_query}'",
+                        also_print=True,
+                    )
+                    log_company_event(
+                        company_copy,
+                        node_label,
+                        f"Results: {len(retry_results)} found",
+                        also_print=True,
+                    )
                     cnpj_retry_results = merge_search_results(cnpj_retry_results, retry_results)
                 if cnpj_retry_results:
                     cnpj_results = merge_search_results(cnpj_results, cnpj_retry_results)
-                enrichment_logs.append(
-                    f"   [RETRY] CNPJ: {len(cnpj_retry_results)} result(s) from {len(cnpj_retry_queries)} query(ies)"
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"[RETRY] CNPJ: {len(cnpj_retry_results)} result(s) from {len(cnpj_retry_queries)} query(ies)",
+                    execution_logs=enrichment_logs,
+                    also_print=False,
                 )
             else:
-                enrichment_logs.append("   [RETRY] CNPJ: Skipped (empty query list)")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    "[RETRY] CNPJ: Skipped (empty query list)",
+                    execution_logs=enrichment_logs,
+                    also_print=False,
+                )
 
         
         evidence_lines = [
@@ -458,7 +523,12 @@ def enrichment_node(state: GraphState):
         try:
             enrichment_llm = get_enrichment_llm()
             llm_request_count += 1  # Increment counter
-            print(f"  └─ [LLM REQUEST #{llm_request_count}] Sending enrichment prompt...")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"[LLM REQUEST #{llm_request_count}] Sending enrichment prompt...",
+                also_print=True,
+            )
             
             prompt_template_phase1 = ChatPromptTemplate.from_messages([
                 ("system", system_directive),
@@ -486,60 +556,130 @@ def enrichment_node(state: GraphState):
                     analysis_text = analysis_text[json_start:json_end].strip()
             
             parsed_output = json.loads(analysis_text)
-            print(f"  └─ LLM Analysis: Success")
+            log_company_event(company_copy, node_label, "LLM Analysis: Success", also_print=True)
         except json.JSONDecodeError as e:
-            print(f"  └─ LLM Analysis: JSON Parse Error - {str(e)}")
-            print(f"     Raw response: {analysis_text[:200]}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"LLM Analysis: JSON Parse Error - {str(e)}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
+            log_company_event(
+                company_copy,
+                node_label,
+                f"Raw response: {analysis_text[:200]}",
+                execution_logs=None,
+                also_print=False,
+            )
             parsed_output = {}
-            enrichment_logs.append(f"   JSON Error for {company_name}: Invalid JSON format")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"JSON Error for {company_name}: Invalid JSON format",
+                execution_logs=enrichment_logs,
+                also_print=False,
+            )
         except Exception as e:
-            print(f"  └─ LLM Analysis: Failed ({str(e)})")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"LLM Analysis: Failed ({str(e)})",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
             parsed_output = {}
-            enrichment_logs.append(f"   LLM Error for {company_name}: {str(e)}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"LLM Error for {company_name}: {str(e)}",
+                execution_logs=enrichment_logs,
+                also_print=False,
+            )
 
         # Extract and validate official_website
         official_website = parsed_output.get("official_website")
         if isinstance(official_website, str) and official_website.strip():
             company_copy["official_website"] = official_website.strip()
-            print(f"     ✓ official_website: {official_website.strip()}")
-            enrichment_logs.append(f"   ✓ official_website: {official_website.strip()}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"✓ official_website: {official_website.strip()}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["official_website"] = None
-            print(f"     ✗ official_website: Not found")
-            enrichment_logs.append(f"   ✗ official_website: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ official_website: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate linkedin_url
         linkedin_url = parsed_output.get("linkedin_url")
         if isinstance(linkedin_url, str) and linkedin_url.strip():
             company_copy["linkedin_url"] = linkedin_url.strip()
-            print(f"     ✓ linkedin_url: {linkedin_url.strip()}")
-            enrichment_logs.append(f"   ✓ linkedin_url: {linkedin_url.strip()}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"✓ linkedin_url: {linkedin_url.strip()}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["linkedin_url"] = None
-            print(f"     ✗ linkedin_url: Not found")
-            enrichment_logs.append(f"   ✗ linkedin_url: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ linkedin_url: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate physical_address
         physical_address = parsed_output.get("physical_address")
         if isinstance(physical_address, str) and physical_address.strip():
             company_copy["physical_address"] = physical_address.strip()
-            print(f"     ✓ physical_address: {physical_address.strip()}")
-            enrichment_logs.append(f"   ✓ physical_address: {physical_address.strip()}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"✓ physical_address: {physical_address.strip()}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["physical_address"] = None
-            print(f"     ✗ physical_address: Not found")
-            enrichment_logs.append(f"   ✗ physical_address: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ physical_address: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate primary_cnpj
         primary_cnpj = parsed_output.get("primary_cnpj")
         if isinstance(primary_cnpj, str) and primary_cnpj.strip():
             company_copy["primary_cnpj"] = primary_cnpj.strip()
-            print(f"     ✓ primary_cnpj: {primary_cnpj.strip()}")
-            enrichment_logs.append(f"   ✓ primary_cnpj: {primary_cnpj.strip()}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"✓ primary_cnpj: {primary_cnpj.strip()}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["primary_cnpj"] = None
-            print(f"     ✗ primary_cnpj: Not found")
-            enrichment_logs.append(f"   ✗ primary_cnpj: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ primary_cnpj: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate radical_cnpj (must be exactly 8 digits)
         radical_cnpj = parsed_output.get("radical_cnpj")
@@ -548,38 +688,73 @@ def enrichment_node(state: GraphState):
             # Validate that radical_cnpj contains exactly 8 digits
             if radical_cnpj_clean.isdigit() and len(radical_cnpj_clean) == 8:
                 company_copy["radical_cnpj"] = radical_cnpj_clean
-                print(f"     ✓ radical_cnpj: {radical_cnpj_clean}")
-                enrichment_logs.append(f"   ✓ radical_cnpj: {radical_cnpj_clean}")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"✓ radical_cnpj: {radical_cnpj_clean}",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             else:
                 company_copy["radical_cnpj"] = None
-                print(f"     ✗ radical_cnpj: Invalid format (expected 8 digits, got '{radical_cnpj_clean}')")
-                enrichment_logs.append(f"   ✗ radical_cnpj: Invalid format (expected 8 digits)")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"✗ radical_cnpj: Invalid format (expected 8 digits, got '{radical_cnpj_clean}')",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
         else:
             company_copy["radical_cnpj"] = None
-            print(f"     ✗ radical_cnpj: Not found")
-            enrichment_logs.append(f"   ✗ radical_cnpj: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ radical_cnpj: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate about_page_url
         about_page_url = parsed_output.get("about_page_url")
         if isinstance(about_page_url, str) and about_page_url.strip():
             company_copy["about_page_url"] = about_page_url.strip()
-            print(f"     ✓ about_page_url: {about_page_url.strip()}")
-            enrichment_logs.append(f"   ✓ about_page_url: {about_page_url.strip()}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"✓ about_page_url: {about_page_url.strip()}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["about_page_url"] = None
-            print(f"     ✗ about_page_url: Not found")
-            enrichment_logs.append(f"   ✗ about_page_url: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ about_page_url: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # Extract and validate institutional_description
         institutional_description = parsed_output.get("institutional_description")
         if isinstance(institutional_description, str) and institutional_description.strip():
             company_copy["institutional_description"] = institutional_description.strip()
-            print("     ✓ institutional_description: Captured")
-            enrichment_logs.append("   ✓ institutional_description: Captured")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✓ institutional_description: Captured",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
         else:
             company_copy["institutional_description"] = None
-            print("     ✗ institutional_description: Not found")
-            enrichment_logs.append("   ✗ institutional_description: Not determined")
+            log_company_event(
+                company_copy,
+                node_label,
+                "✗ institutional_description: Not determined",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
 
         # ===== CHECK IF COMPANY QUALIFIES FOR DEEP SEARCH (After Phase 1 extraction) =====
         # Criteria: High-value sectors (Holding, Petróleo, Finanças) or Revenue > 5000 million R$
@@ -606,7 +781,13 @@ def enrichment_node(state: GraphState):
         corporate_csv_evidence = None
         if qualifies_for_deep_search and company_copy.get("primary_cnpj"):
             primary_cnpj = company_copy.get("primary_cnpj")
-            print(f"  └─ [SNIPER] Filtering CSV data for CNPJ: {primary_cnpj}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"[SNIPER] Filtering CSV data for CNPJ: {primary_cnpj}",
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
             
             sniper_parts = []
             
@@ -614,26 +795,59 @@ def enrichment_node(state: GraphState):
             shareholding_data, shareholding_rows = get_filtered_csv_data(primary_cnpj, "shareholding")
             if shareholding_data:
                 sniper_parts.append(shareholding_data)
-                enrichment_logs.append(f"   ✓ Sniper: Data extracted from fre_cia_aberta_posicao_acionaria_2025.csv")
-                enrichment_logs.append(f"   ✓ Sniper: {shareholding_rows} ownership records found for this company")
-                print(f"     ✓ Sniper: Data extracted from fre_cia_aberta_posicao_acionaria_2025.csv")
-                print(f"     ✓ Sniper: {shareholding_rows} ownership records found for this company")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    "✓ Sniper: Data extracted from fre_cia_aberta_posicao_acionaria_2025.csv",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"✓ Sniper: {shareholding_rows} ownership records found for this company",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             else:
-                enrichment_logs.append(f"   ✗ Sniper: No ownership records found in fre_cia_aberta_posicao_acionaria_2025.csv")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    "✗ Sniper: No ownership records found in fre_cia_aberta_posicao_acionaria_2025.csv",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             
             # Call governance sniper
             governance_data, governance_rows = get_filtered_csv_data(primary_cnpj, "governance")
             if governance_data:
                 sniper_parts.append(governance_data)
-                enrichment_logs.append(f"   ✓ Sniper: {governance_rows} governance records found for this company")
-                print(f"     ✓ Sniper: {governance_rows} governance records found for this company")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"✓ Sniper: {governance_rows} governance records found for this company",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             
             if sniper_parts:
                 deep_search_content = "\n\n".join(sniper_parts)
                 corporate_csv_evidence = deep_search_content
-                print(f"  └─ [DEEP SEARCH] Using CSV Sniper Data - Retrieved {len(deep_search_content)} chars from official sources")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"[DEEP SEARCH] Using CSV Sniper Data - Retrieved {len(deep_search_content)} chars from official sources",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             else:
-                enrichment_logs.append(f"   ✗ Sniper: No records found for CNPJ {primary_cnpj}")
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    f"✗ Sniper: No records found for CNPJ {primary_cnpj}",
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             
             # this function is not being called in the current flow, because it was implemented a deterministic algoritm code to handle the relationship extraction;
             if False and deep_search_content:
@@ -806,7 +1020,13 @@ def enrichment_node(state: GraphState):
             # Brand extraction was previously LLM-based; keep deterministic output.
             company_copy["found_brands"] = []
             company_copy["relationships"] = owns_relationships
-            enrichment_logs.append(f"   [DETERMINISTIC] OWNS relationships: {len(owns_relationships)}")
+            log_company_event(
+                company_copy,
+                node_label,
+                f"[DETERMINISTIC] OWNS relationships: {len(owns_relationships)}",
+                execution_logs=enrichment_logs,
+                also_print=False,
+            )
         else:
             # No deep search: set Neo4j fields to null/empty
             company_copy["corporate_group_notes"] = None
@@ -852,10 +1072,17 @@ async def institutional_scraping_node(state: GraphState):
         for index, company in enumerate(source_companies):
             company_name = company.get("nome_empresa", "Unknown")
             about_page_url = company.get("about_page_url")
+            node_label = "institutional"
 
             if not about_page_url:
                 markdown_results.append(None)
-                scraping_logs.append(f"[SKIPPED] Company #{index+1}: Missing about_page_url")
+                log_company_event(
+                    company,
+                    node_label,
+                    f"[SKIPPED] Company #{index+1}: Missing about_page_url",
+                    execution_logs=scraping_logs,
+                    also_print=True,
+                )
                 continue
 
             try:
@@ -882,13 +1109,31 @@ async def institutional_scraping_node(state: GraphState):
 
                 if markdown:
                     markdown_results.append(markdown)
-                    scraping_logs.append(f"✓ Institutional markdown captured for {company_name}")
+                    log_company_event(
+                        company,
+                        node_label,
+                        f"✓ Institutional markdown captured for {company_name}",
+                        execution_logs=scraping_logs,
+                        also_print=True,
+                    )
                 else:
                     markdown_results.append(None)
-                    scraping_logs.append(f"✗ Institutional markdown empty for {company_name}")
+                    log_company_event(
+                        company,
+                        node_label,
+                        f"✗ Institutional markdown empty for {company_name}",
+                        execution_logs=scraping_logs,
+                        also_print=True,
+                    )
             except Exception as e:
                 markdown_results.append(None)
-                scraping_logs.append(f"✗ Institutional scrape failed for {company_name}: {str(e)}")
+                log_company_event(
+                    company,
+                    node_label,
+                    f"✗ Institutional scrape failed for {company_name}: {str(e)}",
+                    execution_logs=scraping_logs,
+                    also_print=True,
+                )
 
         await context.close()
         await browser.close()

@@ -7,6 +7,7 @@ import re
 import threading
 import time
 import zipfile
+from datetime import datetime
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -23,6 +24,8 @@ _FRE_ZIP_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/fre_cia_
 _FRE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../data/fre_cia_aberta_2025"))
 _FRE_ZIP_PATH = os.path.join(_FRE_DIR, "fre_cia_aberta_2025.zip")
 _FRE_LOCK = threading.Lock()
+_LOG_LOCK = threading.Lock()
+_LOG_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "../logs"))
 
 
 def _is_valid_zip(path: str) -> bool:
@@ -512,6 +515,67 @@ def merge_search_results(
             }
         )
     return merged
+
+
+def _slugify_company_name(value: str) -> str:
+    """
+    Build a safe slug for file names.
+    """
+    text = re.sub(r"[^\w\s-]", "", (value or "").strip().lower())
+    text = re.sub(r"[\s_-]+", "-", text).strip("-")
+    return text or "company"
+
+
+def ensure_company_log_context(company: Dict) -> tuple[str, str]:
+    """
+    Ensure run_id and log_file exist for the company.
+    """
+    run_id = company.get("run_id")
+    if not run_id:
+        base_name = company.get("nome_empresa") or company.get("razao_social") or "company"
+        slug = _slugify_company_name(str(base_name))
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = random.randint(1000, 9999)
+        run_id = f"{timestamp}-{slug}-{suffix}"
+        company["run_id"] = run_id
+    log_file = company.get("log_file")
+    if not log_file:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        log_file = os.path.join(_LOG_DIR, f"{run_id}.log")
+        company["log_file"] = log_file
+    return run_id, log_file
+
+
+def log_company_event(
+    company: Dict,
+    node: str,
+    message: str,
+    execution_logs: Optional[List[str]] = None,
+    also_print: bool = True,
+) -> str:
+    """
+    Emit a prefixed log line for a company and write to its log file.
+    """
+    if not isinstance(company, dict):
+        prefix = f"[unknown|{node}]"
+        line = f"{prefix} {message}"
+        if also_print:
+            print(line)
+        if execution_logs is not None:
+            execution_logs.append(line)
+        return line
+
+    run_id, log_file = ensure_company_log_context(company)
+    prefix = f"[{run_id}|{node}]"
+    line = f"{prefix} {message}"
+    if also_print:
+        print(line)
+    if execution_logs is not None:
+        execution_logs.append(line)
+    with _LOG_LOCK:
+        with open(log_file, "a", encoding="utf-8") as handle:
+            handle.write(f"{line}\n")
+    return line
 
 
 async def fetch_corporate_structure_legacy(cnpj: str) -> Optional[str]:
