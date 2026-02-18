@@ -17,6 +17,9 @@ from utils.tools import (
     search_company_web_presence,
     get_filtered_csv_data,
     get_shareholding_owns_relationships,
+    build_cnpj_retry_queries,
+    has_cnpj_in_results,
+    merge_search_results,
 )
 from utils.neo4j_ingest import ingest_companies_batch
 
@@ -346,6 +349,25 @@ def enrichment_node(state: GraphState):
         about_results = search_company_web_presence(about_query)
         print(f"  └─ About Query: '{about_query}'")
         print(f"     Results: {len(about_results)} found")
+
+        should_retry_cnpj = not cnpj_results or not has_cnpj_in_results(cnpj_results)
+        if should_retry_cnpj:
+            cnpj_retry_queries = build_cnpj_retry_queries(company_name, city)
+            cnpj_retry_results = []
+            if cnpj_retry_queries:
+                print("  └─ CNPJ Retry: Triggered")
+                for retry_query in cnpj_retry_queries:
+                    retry_results = search_company_web_presence(retry_query)
+                    print(f"  └─ CNPJ Retry Query: '{retry_query}'")
+                    print(f"     Results: {len(retry_results)} found")
+                    cnpj_retry_results = merge_search_results(cnpj_retry_results, retry_results)
+                if cnpj_retry_results:
+                    cnpj_results = merge_search_results(cnpj_results, cnpj_retry_results)
+                enrichment_logs.append(
+                    f"   [RETRY] CNPJ: {len(cnpj_retry_results)} result(s) from {len(cnpj_retry_queries)} query(ies)"
+                )
+            else:
+                enrichment_logs.append("   [RETRY] CNPJ: Skipped (empty query list)")
 
         
         evidence_lines = [

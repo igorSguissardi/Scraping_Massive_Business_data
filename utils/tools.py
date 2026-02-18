@@ -446,6 +446,74 @@ def search_company_web_presence(query: str, max_results: int = 4) -> List[Dict[s
         return []
 
 
+_CNPJ_FORMATTED_RE = re.compile(r"\b\d{2}\.?\d{3}\.?\d{3}/?\d{4}-?\d{2}\b")
+_CNPJ_DIGITS_RE = re.compile(r"\b\d{14}\b")
+
+
+def has_cnpj_in_results(results: List[Dict[str, str]]) -> bool:
+    """
+    Check if search result text includes a plausible CNPJ.
+    """
+    if not results:
+        return False
+    for item in results:
+        text = " ".join(
+            str(item.get(key, "")).strip() for key in ("title", "snippet", "link") if item.get(key)
+        )
+        if not text:
+            continue
+        if _CNPJ_FORMATTED_RE.search(text) or _CNPJ_DIGITS_RE.search(text):
+            return True
+    return False
+
+
+def build_cnpj_retry_queries(nome_empresa: str, sede: str) -> List[str]:
+    """
+    Build retry query list for CNPJ discovery.
+    """
+    base = (nome_empresa or "").strip()
+    city = (sede or "").strip()
+    if not base:
+        return []
+    queries = []
+    queries.append(f"{base} CNPJ")
+    if city:
+        queries.append(f"{base} {city} CNPJ")
+    queries.append(f"\"{base}\" CNPJ Receita Federal")
+    queries.append(f"{base} CNPJ site:gov.br")
+    return queries
+
+
+def merge_search_results(
+    primary: List[Dict[str, str]],
+    extra: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    """
+    Merge search results with lightweight deduplication.
+    """
+    merged: List[Dict[str, str]] = []
+    seen = set()
+    for item in (primary or []) + (extra or []):
+        title = str(item.get("title", "")).strip()
+        link = str(item.get("link", "")).strip()
+        snippet = str(item.get("snippet", "")).strip()
+        if link:
+            key = link.lower()
+        else:
+            key = f"{title}|{snippet}".lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(
+            {
+                "title": title,
+                "link": link,
+                "snippet": snippet,
+            }
+        )
+    return merged
+
+
 async def fetch_corporate_structure_legacy(cnpj: str) -> Optional[str]:
     """
     [LEGACY - PRESERVED FOR REFERENCE]
