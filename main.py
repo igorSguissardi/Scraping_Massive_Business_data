@@ -1,6 +1,7 @@
 # Entry point for the application that triggers the graph execution with the required initial parameters.
 import os
 import asyncio
+import time
 from dotenv import load_dotenv
 
 # Load environment variables BEFORE importing anything else that needs them
@@ -31,12 +32,16 @@ def main():
         "institutional_summary": [],
         "corporate_csv_evidence": [],
         "ingested_company_ids": [],
+        "llm_request_count": 0,
     }
     
     print("--- Starting Valor 1000 Intelligence Discovery ---")
     
     # Run the graph and capture the final state
+    run_start = time.perf_counter()
     final_state = asyncio.run(app.ainvoke(initial_input))
+    run_end = time.perf_counter()
+    run_elapsed_seconds = run_end - run_start
     
     # Display the result of the intelligence process
     print("\n--- Final Process Logs ---")
@@ -67,6 +72,8 @@ def main():
     print(f"\n✅ Total companies in database: {len(final_state['companies'])}")
     print(f"✅ Enriched companies: {len(enriched_companies)}")
     print(f"✅ Pending enrichment: {len(final_state['companies']) - len(enriched_companies)}")
+    print(f"✅ Total LLM API requests (run): {final_state.get('llm_request_count', 0)}")
+    print(f"✅ Run duration (seconds): {run_elapsed_seconds:.2f}")
 
 if __name__ == "__main__":
     main()

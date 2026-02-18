@@ -42,8 +42,8 @@ class GraphState(TypedDict):
     company_queue: List[CompanyRecord]
     # Apply annotated aggregator so audit trail remains cumulative
     execution_logs: Annotated[List[str], operator.add]
-    # Track LLM API calls for cost auditing and rate limit management
-    llm_request_count: int
+    # Track LLM API call count across fan-out branches
+    llm_request_count: Annotated[int, operator.add]
     # Store CSV sniper results for corporate structure enrichment
     corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
     # Store institutional content distilled into markdown
@@ -64,3 +64,4 @@ class CompanyState(TypedDict):
     institutional_markdown: Annotated[List[Optional[str]], operator.add]
     institutional_summary: Annotated[List[Optional[str]], operator.add]
     corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
+    llm_request_count: Annotated[int, operator.add]

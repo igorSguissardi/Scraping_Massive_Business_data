@@ -45,6 +45,7 @@ def dispatch_companies(state: GraphState):
                 "company": company,
                 "execution_logs": [],
                 "institutional_markdown": [],
+                "llm_request_count": 0,
             },
         )
         for company in companies

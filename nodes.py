@@ -58,11 +58,13 @@ def enrichment_company_node(state: dict):
     enriched_companies = result.get("companies", [])
     enriched_company = enriched_companies[0] if enriched_companies else company
     corporate_csv_evidence = result.get("corporate_csv_evidence")
+    llm_request_count = result.get("llm_request_count", 0)
     return {
         "company": enriched_company,
         "companies": [enriched_company],
         "execution_logs": result.get("execution_logs", []),
         "corporate_csv_evidence": [corporate_csv_evidence],
+        "llm_request_count": llm_request_count,
     }
 
 
@@ -86,10 +88,12 @@ async def institutional_company_node(state: dict):
 
     summary = None
     summary_logs = []
+    llm_request_count = 0
     node_label = "institutional_summary"
     if markdown:
         try:
             enrichment_llm = get_enrichment_llm()
+            llm_request_count += 1
             prompt_template = ChatPromptTemplate.from_messages(
                 [
                     (
@@ -151,6 +155,7 @@ async def institutional_company_node(state: dict):
         "institutional_markdown": markdown_list,
         "institutional_summary": [summary],
         "execution_logs": result.get("execution_logs", []) + summary_logs,
+        "llm_request_count": llm_request_count,
     }
 
 
@@ -1038,13 +1043,14 @@ def enrichment_node(state: GraphState):
     log_message = (
         f"Enrichment node processed {processed_count} companies with LLM-guided selection."
     )
-    llm_summary = f"Total LLM API requests: {llm_request_count}"
+    llm_summary = f"LLM API requests in enrichment node: {llm_request_count}"
     deep_search_note = "CSV Sniper integration active for corporate structure enrichment"
 
     return {
         "companies": enriched_companies,
         "execution_logs": [log_message, llm_summary, deep_search_note] + enrichment_logs,
         "corporate_csv_evidence": corporate_csv_evidence,
+        "llm_request_count": llm_request_count,
     }
 
 
