@@ -3,6 +3,20 @@ import operator
 from typing import Annotated, List, Optional, TypedDict
 
 
+def _coalesce_str(left: str, right: str) -> str:
+    if left:
+        return left
+    return right
+
+
+def _max_int(left: int, right: int) -> int:
+    if not left:
+        return right
+    if not right:
+        return left
+    return max(left, right)
+
+
 class CompanyRecord(TypedDict, total=False):
     """
     Define enrichment payload for company.
@@ -53,8 +67,8 @@ class GraphState(TypedDict):
     # Track which companies have been ingested into Neo4j
     ingested_company_ids: Annotated[List[str], operator.add]
     # Neo4j batch ingest coordination
-    neo4j_expected_total: int
-    neo4j_batch_token: str
+    neo4j_expected_total: Annotated[int, _max_int]
+    neo4j_batch_token: Annotated[str, _coalesce_str]
 
 
 class CompanyState(TypedDict):

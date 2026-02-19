@@ -27,7 +27,7 @@ from utils.neo4j_ingest import ingest_companies_batch
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
-_MAX_COMPANIES = 10
+_MAX_COMPANIES = 100
 NEO4J_BATCH_SIZE = int(os.getenv("NEO4J_BATCH_SIZE", "10"))
 
 # Global concurrency controls
