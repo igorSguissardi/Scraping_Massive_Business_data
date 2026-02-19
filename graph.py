@@ -38,6 +38,8 @@ workflow.add_edge("limit_companies", "prepare_fanout")
 
 def dispatch_companies(state: GraphState):
     companies = state.get("company_queue", [])
+    expected_total = state.get("neo4j_expected_total") or len(companies)
+    batch_token = state.get("neo4j_batch_token")
     return [
         Send(
             "company_pipeline",
@@ -46,6 +48,9 @@ def dispatch_companies(state: GraphState):
                 "execution_logs": [],
                 "institutional_markdown": [],
                 "llm_request_count": 0,
+                "neo4j_expected_total": expected_total,
+                "neo4j_batch_token": batch_token,
+                "ingested_company_ids": [],
             },
         )
         for company in companies

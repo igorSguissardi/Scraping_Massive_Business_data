@@ -52,6 +52,9 @@ class GraphState(TypedDict):
     institutional_summary: Annotated[List[Optional[str]], operator.add]
     # Track which companies have been ingested into Neo4j
     ingested_company_ids: Annotated[List[str], operator.add]
+    # Neo4j batch ingest coordination
+    neo4j_expected_total: int
+    neo4j_batch_token: str
 
 
 class CompanyState(TypedDict):
@@ -65,3 +68,7 @@ class CompanyState(TypedDict):
     institutional_summary: Annotated[List[Optional[str]], operator.add]
     corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
     llm_request_count: Annotated[int, operator.add]
+    # Neo4j batch ingest coordination (propagated per-company)
+    neo4j_expected_total: int
+    neo4j_batch_token: str
+    ingested_company_ids: Annotated[List[str], operator.add]

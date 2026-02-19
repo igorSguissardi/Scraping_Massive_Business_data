@@ -34,6 +34,8 @@ def main():
         "corporate_csv_evidence": [],
         "ingested_company_ids": [],
         "llm_request_count": 0,
+        "neo4j_expected_total": 0,
+        "neo4j_batch_token": "",
     }
     
     print("--- Starting Valor 1000 Intelligence Discovery ---")

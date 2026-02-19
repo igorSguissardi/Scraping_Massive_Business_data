@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import requests
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -29,19 +30,69 @@ _enrichment_llm = None
 _MAX_COMPANIES = 10
 NEO4J_BATCH_SIZE = int(os.getenv("NEO4J_BATCH_SIZE", "10"))
 
+# Global concurrency controls
+OPENAI_CONCURRENCY = int(os.getenv("OPENAI_CONCURRENCY", "20"))
+SEARCH_CONCURRENCY = int(os.getenv("SEARCH_CONCURRENCY", "20"))
+SCRAPE_CONCURRENCY = int(os.getenv("SCRAPE_CONCURRENCY", "5"))
+
+OPENAI_SEM = asyncio.Semaphore(OPENAI_CONCURRENCY)
+SEARCH_SEM = asyncio.Semaphore(SEARCH_CONCURRENCY)
+SCRAPE_SEM = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+
+# Neo4j batch ingest coordination (cross-branch)
+_NEO4J_BATCH_LOCK = asyncio.Lock()
+_NEO4J_BATCH_BUFFER = []
+_NEO4J_EXPECTED_TOTAL = None
+_NEO4J_PROCESSED_TOTAL = 0
+_NEO4J_RUN_TOKEN = None
+_NEO4J_INGESTED_IDS = set()
+
+
+def _reset_neo4j_batch_state() -> None:
+    """
+    Reset cross-branch Neo4j batch buffers for a new run.
+    """
+    global _NEO4J_BATCH_BUFFER, _NEO4J_EXPECTED_TOTAL, _NEO4J_PROCESSED_TOTAL, _NEO4J_RUN_TOKEN, _NEO4J_INGESTED_IDS
+    _NEO4J_BATCH_BUFFER = []
+    _NEO4J_EXPECTED_TOTAL = None
+    _NEO4J_PROCESSED_TOTAL = 0
+    _NEO4J_RUN_TOKEN = None
+    _NEO4J_INGESTED_IDS = set()
+
 
 def prepare_company_fanout(state: GraphState):
     """
     Stage companies for per-company fan-out.
     """
     source_companies = state.get("company_queue", [])
+    batch_token = state.get("neo4j_batch_token")
+    if not batch_token:
+        batch_token = str(time.time_ns())
     return {
         "company_queue": source_companies,
         "execution_logs": [f"Prepared {len(source_companies)} companies for per-company processing."],
+        "neo4j_expected_total": len(source_companies),
+        "neo4j_batch_token": batch_token,
     }
 
 
-def enrichment_company_node(state: dict):
+async def _run_search(query: str):
+    """
+    Run a web search with global concurrency control.
+    """
+    async with SEARCH_SEM:
+        return await asyncio.to_thread(search_company_web_presence, query)
+
+
+async def _run_llm(chain, payload: dict):
+    """
+    Run an LLM call with global concurrency control.
+    """
+    async with OPENAI_SEM:
+        return await asyncio.to_thread(chain.invoke, payload)
+
+
+async def enrichment_company_node(state: dict):
     """
     Run enrichment for a single company by reusing the batch enrichment node.
     """
@@ -54,7 +105,7 @@ def enrichment_company_node(state: dict):
         "execution_logs": [],
         "institutional_markdown": [],
     }
-    result = enrichment_node(temp_state)
+    result = await enrichment_node(temp_state)
     enriched_companies = result.get("companies", [])
     enriched_company = enriched_companies[0] if enriched_companies else company
     corporate_csv_evidence = result.get("corporate_csv_evidence")
@@ -81,7 +132,8 @@ async def institutional_company_node(state: dict):
         "execution_logs": [],
         "institutional_markdown": [],
     }
-    result = await institutional_scraping_node(temp_state)
+    async with SCRAPE_SEM:
+        result = await institutional_scraping_node(temp_state)
     markdown_list = result.get("institutional_markdown", [])
     markdown = markdown_list[0] if markdown_list else None
 
@@ -110,7 +162,7 @@ async def institutional_company_node(state: dict):
                 ]
             )
             chain = prompt_template | enrichment_llm
-            llm_response = chain.invoke({"markdown": markdown})
+            llm_response = await _run_llm(chain, {"markdown": markdown})
             summary_text = getattr(llm_response, "content", str(llm_response)).strip()
             if summary_text and summary_text.lower() != "null":
                 summary = summary_text
@@ -162,8 +214,12 @@ async def neo4j_ingest_node(state: GraphState):
     """
     Batch-ingest enriched companies into Neo4j using UNWIND.
     """
+    global _NEO4J_RUN_TOKEN, _NEO4J_EXPECTED_TOTAL, _NEO4J_PROCESSED_TOTAL
     companies = state.get("companies", [])
-    ingested_ids = set(state.get("ingested_company_ids", []))
+    ingested_ids_state = set(state.get("ingested_company_ids", []))
+    expected_total = state.get("neo4j_expected_total") or len(state.get("company_queue") or []) or len(companies)
+    batch_token = state.get("neo4j_batch_token")
+    processed_increment = 1 if state.get("company") is not None else len(companies)
     def _normalize_cnpj(value: str) -> str | None:
         if value is None:
             return None
@@ -171,62 +227,84 @@ async def neo4j_ingest_node(state: GraphState):
         if len(text) != 14 or not text.isdigit():
             return None
         return text
-    pending = []
-    seen_ids = set()
+    valid_pending = []
     for company in companies:
         normalized = _normalize_cnpj(company.get("primary_cnpj"))
         if not normalized:
             continue
-        if normalized in ingested_ids:
-            continue
-        if normalized in seen_ids:
-            continue
         if isinstance(company, dict) and company.get("primary_cnpj") != normalized:
             company = dict(company)
             company["primary_cnpj"] = normalized
-        pending.append(company)
-        seen_ids.add(normalized)
+        valid_pending.append((normalized, company))
 
-    if not pending:
+    batches = []
+    buffer_size = 0
+    processed_total = 0
+    expected_snapshot = expected_total or 0
+
+    async with _NEO4J_BATCH_LOCK:
+        if batch_token and batch_token != _NEO4J_RUN_TOKEN:
+            _reset_neo4j_batch_state()
+            _NEO4J_RUN_TOKEN = batch_token
+
+        if _NEO4J_EXPECTED_TOTAL is None and expected_total:
+            _NEO4J_EXPECTED_TOTAL = expected_total
+
+        expected_snapshot = _NEO4J_EXPECTED_TOTAL or expected_snapshot
+        buffer_ids = {
+            _normalize_cnpj(item.get("primary_cnpj")) for item in _NEO4J_BATCH_BUFFER if item.get("primary_cnpj")
+        }
+
+        for normalized, company in valid_pending:
+            if normalized in ingested_ids_state or normalized in _NEO4J_INGESTED_IDS:
+                continue
+            if normalized in buffer_ids:
+                continue
+            _NEO4J_BATCH_BUFFER.append(company)
+            buffer_ids.add(normalized)
+
+        if processed_increment:
+            _NEO4J_PROCESSED_TOTAL = _NEO4J_PROCESSED_TOTAL + processed_increment
+
+        while len(_NEO4J_BATCH_BUFFER) >= NEO4J_BATCH_SIZE:
+            batch = _NEO4J_BATCH_BUFFER[:NEO4J_BATCH_SIZE]
+            del _NEO4J_BATCH_BUFFER[:NEO4J_BATCH_SIZE]
+            batches.append(batch)
+
+        if expected_snapshot and _NEO4J_PROCESSED_TOTAL >= expected_snapshot and _NEO4J_BATCH_BUFFER:
+            batches.append(list(_NEO4J_BATCH_BUFFER))
+            _NEO4J_BATCH_BUFFER.clear()
+
+        buffer_size = len(_NEO4J_BATCH_BUFFER)
+        processed_total = _NEO4J_PROCESSED_TOTAL
+
+    if not batches:
         if companies:
             return {
                 "execution_logs": [
-                    f"[NEO4J] Skipped ingestion: 0 pending with valid 14-digit CNPJ out of {len(companies)} companies."
+                    (
+                        "[NEO4J] Buffered "
+                        f"{len(valid_pending)} company(ies). "
+                        f"Buffer {buffer_size}/{NEO4J_BATCH_SIZE}. "
+                        f"Processed {processed_total}/{expected_snapshot}."
+                    )
                 ]
             }
         return {}
 
-    total_expected = len(state.get("company_queue") or [])
-    total_ready = len(companies)
-    if total_expected == 0:
-        # Fall back when fan-out context is missing (e.g., single-company runs)
-        total_expected = total_ready
-    # In fan-out mode each branch only sees a subset, so flush immediately.
-    fanout_partial = total_expected > 0 and total_ready < total_expected
-    should_flush = fanout_partial or len(pending) >= NEO4J_BATCH_SIZE or total_ready >= total_expected
-    if not should_flush:
-        return {
-            "execution_logs": [
-                f"[NEO4J] Waiting for more companies (ready {total_ready}/{total_expected}, pending {len(pending)})."
-            ]
-        }
-
     try:
         all_ingested = []
         batch_count = 0
-        offset = 0
-        while offset < len(pending):
-            batch = pending[offset : offset + NEO4J_BATCH_SIZE]
+        for batch in batches:
             ingested = await asyncio.to_thread(ingest_companies_batch, batch)
             if not ingested:
                 print("[NEO4J] No valid company IDs to ingest in this batch.")
-                if not all_ingested:
-                    return {"execution_logs": ["[NEO4J] No valid company IDs to ingest in this batch."]}
-                break
+                continue
             batch_count += 1
             all_ingested.extend(ingested)
-            ingested_ids.update(ingested)
-            offset += len(batch)
+        if all_ingested:
+            async with _NEO4J_BATCH_LOCK:
+                _NEO4J_INGESTED_IDS.update(all_ingested)
         print(f"[NEO4J] Ingested {len(all_ingested)} companies in {batch_count} batch(es).")
         return {
             "ingested_company_ids": all_ingested,
@@ -321,7 +399,7 @@ def ranking_scraper_node(state: GraphState):
 
 
 
-def enrichment_node(state: GraphState):
+async def enrichment_node(state: GraphState):
     """
     Enrich company record with automated discovery.
     Log all search queries and results for transparency and debugging.
@@ -375,27 +453,27 @@ def enrichment_node(state: GraphState):
         )
 
         site_query = get_search_query(company_name, city, "site")
-        site_results = search_company_web_presence(site_query)
+        site_results = await _run_search(site_query)
         log_company_event(company_copy, node_label, f"Official site Query: '{site_query}'", also_print=True)
         log_company_event(company_copy, node_label, f"Results: {len(site_results)} found", also_print=True)
 
         cnpj_query = get_search_query(company_name, city, "cnpj")
-        cnpj_results = search_company_web_presence(cnpj_query)
+        cnpj_results = await _run_search(cnpj_query)
         log_company_event(company_copy, node_label, f"CNPJ Query: '{cnpj_query}'", also_print=True)
         log_company_event(company_copy, node_label, f"Results: {len(cnpj_results)} found", also_print=True)
 
         linkedin_query = get_search_query(company_name, city, "linkedin")
-        linkedin_results = search_company_web_presence(linkedin_query)
+        linkedin_results = await _run_search(linkedin_query)
         log_company_event(company_copy, node_label, f"Linkedin Query: '{linkedin_query}'", also_print=True)
         log_company_event(company_copy, node_label, f"Results: {len(linkedin_results)} found", also_print=True)
 
         address_query = get_search_query(company_name, city, "address")
-        address_results = search_company_web_presence(address_query)
+        address_results = await _run_search(address_query)
         log_company_event(company_copy, node_label, f"Adress Query: '{address_query}'", also_print=True)
         log_company_event(company_copy, node_label, f"Results: {len(address_results)} found", also_print=True)
 
         about_query = f"{company_name} Sobre"
-        about_results = search_company_web_presence(about_query)
+        about_results = await _run_search(about_query)
         log_company_event(company_copy, node_label, f"About Query: '{about_query}'", also_print=True)
         log_company_event(company_copy, node_label, f"Results: {len(about_results)} found", also_print=True)
 
@@ -406,7 +484,7 @@ def enrichment_node(state: GraphState):
             if cnpj_retry_queries:
                 log_company_event(company_copy, node_label, "CNPJ Retry: Triggered", also_print=True)
                 for retry_query in cnpj_retry_queries:
-                    retry_results = search_company_web_presence(retry_query)
+                    retry_results = await _run_search(retry_query)
                     log_company_event(
                         company_copy,
                         node_label,
@@ -539,7 +617,7 @@ def enrichment_node(state: GraphState):
                 ("human", "{user_input}")
             ])
             chain = prompt_template_phase1 | enrichment_llm
-            llm_response = chain.invoke({"user_input": llm_prompt})
+            llm_response = await _run_llm(chain, {"user_input": llm_prompt})
             analysis_text = getattr(llm_response, "content", str(llm_response))
             # Validate that we received a non-empty response
             if not analysis_text or not analysis_text.strip():
