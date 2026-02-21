@@ -7,4 +7,3 @@ venv
 __pycache__/
 *.zip
 logs/
-data/llm_usage_totals.json

@@ -21,7 +21,6 @@ else:
 
 from graph import app
 from utils.tools import clear_run_logs
-from utils.llm_costs import update_cumulative_llm_usage
 
 def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge
@@ -91,19 +90,6 @@ def main():
     run_cost_usd = float(final_state.get("llm_cost_usd", 0.0) or 0.0)
     run_avg_cost = run_cost_usd / run_requests if run_requests else 0.0
 
-    totals = update_cumulative_llm_usage(
-        {
-            "requests": run_requests,
-            "input_tokens": run_input_tokens,
-            "output_tokens": run_output_tokens,
-            "total_tokens": run_total_tokens,
-            "cost_usd": run_cost_usd,
-        }
-    )
-    total_requests = int(totals.get("total_requests", 0) or 0)
-    total_cost_usd = float(totals.get("total_cost_usd", 0.0) or 0.0)
-    total_avg_cost = total_cost_usd / total_requests if total_requests else 0.0
-
     print("\n[LLM COST] Run summary")
     print(f"[LLM COST] Requests: {run_requests}")
     print(f"[LLM COST] Input tokens: {run_input_tokens}")
@@ -111,11 +97,6 @@ def main():
     print(f"[LLM COST] Total tokens: {run_total_tokens}")
     print(f"[LLM COST] Cost (USD): {run_cost_usd:.6f}")
     print(f"[LLM COST] Avg per request (USD): {run_avg_cost:.6f}")
-
-    print("\n[LLM COST] Cumulative summary (all runs)")
-    print(f"[LLM COST] Total requests: {total_requests}")
-    print(f"[LLM COST] Total cost (USD): {total_cost_usd:.6f}")
-    print(f"[LLM COST] Avg per request (USD): {total_avg_cost:.6f}")
 
 if __name__ == "__main__":
     main()

@@ -1,0 +1,9 @@
+{
+  "runs": 2,
+  "total_requests": 34,
+  "total_input_tokens": 229425,
+  "total_output_tokens": 3920,
+  "total_tokens": 233345,
+  "total_cost_usd": 0.020803199999999997,
+  "updated_at": "2026-02-21T22:18:58.149763+00:00"
+}
