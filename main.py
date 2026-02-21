@@ -15,12 +15,13 @@ load_dotenv(dotenv_path=env_path, override=True, verbose=True)
 # Verify API key is loaded
 api_key = os.getenv("OPENAI_API_KEY")
 if api_key:
-    print(f"[DEBUG] ✓ OPENAI_API_KEY loaded successfully (length: {len(api_key)})")
+    print(f"[DEBUG] OK OPENAI_API_KEY loaded successfully (length: {len(api_key)})")
 else:
-    print("[DEBUG] ✗ OPENAI_API_KEY not found after load_dotenv()")
+    print("[DEBUG] ERROR OPENAI_API_KEY not found after load_dotenv()")
 
 from graph import app
 from utils.tools import clear_run_logs
+from utils.llm_costs import update_cumulative_llm_usage
 
 def main(): 
     # The starting point is strictly the Valor 1000 URL provided in the challenge
@@ -34,6 +35,10 @@ def main():
         "corporate_csv_evidence": [],
         "ingested_company_ids": [],
         "llm_request_count": 0,
+        "llm_input_tokens": 0,
+        "llm_output_tokens": 0,
+        "llm_total_tokens": 0,
+        "llm_cost_usd": 0.0,
         "neo4j_expected_total": 0,
         "neo4j_batch_token": "",
     }
@@ -60,24 +65,57 @@ def main():
         for company in enriched_companies:
             nome = company.get("nome_empresa", "N/A")
             sede = company.get("sede", "N/A")
-            website = company.get("official_website", "❌ Not found")
-            cnpj = company.get("primary_cnpj", "❌ Not found")
+            website = company.get("official_website", "Not found")
+            cnpj = company.get("primary_cnpj", "Not found")
             corporate = company.get("corporate_group_notes", "No info")
             brands = company.get("found_brands", [])
             
-            print(f"\n  📊 {nome} | {sede}")
-            print(f"     🌐 Website: {website}")
-            print(f"     📋 CNPJ: {cnpj}")
+            print(f"\n  [COMPANY] {nome} | {sede}")
+            print(f"     Website: {website}")
+            print(f"     CNPJ: {cnpj}")
             if corporate:
-                print(f"     🏢 Corporate Info: {corporate}")
+                print(f"     Corporate Info: {corporate}")
             if brands:
-                print(f"     🏷️  Brands: {', '.join(brands)}")
+                print(f"     Brands: {', '.join(brands)}")
     
-    print(f"\n✅ Total companies in database: {len(final_state['companies'])}")
-    print(f"✅ Enriched companies: {len(enriched_companies)}")
-    print(f"✅ Pending enrichment: {len(final_state['companies']) - len(enriched_companies)}")
-    print(f"✅ Total LLM API requests (run): {final_state.get('llm_request_count', 0)}")
-    print(f"✅ Run duration (seconds): {run_elapsed_seconds:.2f}")
+    print(f"\n[OK] Total companies in database: {len(final_state['companies'])}")
+    print(f"[OK] Enriched companies: {len(enriched_companies)}")
+    print(f"[OK] Pending enrichment: {len(final_state['companies']) - len(enriched_companies)}")
+    print(f"[OK] Total LLM API requests (run): {final_state.get('llm_request_count', 0)}")
+    print(f"[OK] Run duration (seconds): {run_elapsed_seconds:.2f}")
+
+    run_requests = int(final_state.get("llm_request_count", 0) or 0)
+    run_input_tokens = int(final_state.get("llm_input_tokens", 0) or 0)
+    run_output_tokens = int(final_state.get("llm_output_tokens", 0) or 0)
+    run_total_tokens = int(final_state.get("llm_total_tokens", 0) or 0)
+    run_cost_usd = float(final_state.get("llm_cost_usd", 0.0) or 0.0)
+    run_avg_cost = run_cost_usd / run_requests if run_requests else 0.0
+
+    totals = update_cumulative_llm_usage(
+        {
+            "requests": run_requests,
+            "input_tokens": run_input_tokens,
+            "output_tokens": run_output_tokens,
+            "total_tokens": run_total_tokens,
+            "cost_usd": run_cost_usd,
+        }
+    )
+    total_requests = int(totals.get("total_requests", 0) or 0)
+    total_cost_usd = float(totals.get("total_cost_usd", 0.0) or 0.0)
+    total_avg_cost = total_cost_usd / total_requests if total_requests else 0.0
+
+    print("\n[LLM COST] Run summary")
+    print(f"[LLM COST] Requests: {run_requests}")
+    print(f"[LLM COST] Input tokens: {run_input_tokens}")
+    print(f"[LLM COST] Output tokens: {run_output_tokens}")
+    print(f"[LLM COST] Total tokens: {run_total_tokens}")
+    print(f"[LLM COST] Cost (USD): {run_cost_usd:.6f}")
+    print(f"[LLM COST] Avg per request (USD): {run_avg_cost:.6f}")
+
+    print("\n[LLM COST] Cumulative summary (all runs)")
+    print(f"[LLM COST] Total requests: {total_requests}")
+    print(f"[LLM COST] Total cost (USD): {total_cost_usd:.6f}")
+    print(f"[LLM COST] Avg per request (USD): {total_avg_cost:.6f}")
 
 if __name__ == "__main__":
     main()

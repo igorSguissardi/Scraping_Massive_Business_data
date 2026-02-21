@@ -58,6 +58,12 @@ class GraphState(TypedDict):
     execution_logs: Annotated[List[str], operator.add]
     # Track LLM API call count across fan-out branches
     llm_request_count: Annotated[int, operator.add]
+    # Track LLM token usage across fan-out branches
+    llm_input_tokens: Annotated[int, operator.add]
+    llm_output_tokens: Annotated[int, operator.add]
+    llm_total_tokens: Annotated[int, operator.add]
+    # Track LLM cost (USD) across fan-out branches
+    llm_cost_usd: Annotated[float, operator.add]
     # Store CSV sniper results for corporate structure enrichment
     corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
     # Store institutional content distilled into markdown
@@ -82,6 +88,10 @@ class CompanyState(TypedDict):
     institutional_summary: Annotated[List[Optional[str]], operator.add]
     corporate_csv_evidence: Annotated[List[Optional[str]], operator.add]
     llm_request_count: Annotated[int, operator.add]
+    llm_input_tokens: Annotated[int, operator.add]
+    llm_output_tokens: Annotated[int, operator.add]
+    llm_total_tokens: Annotated[int, operator.add]
+    llm_cost_usd: Annotated[float, operator.add]
     # Neo4j batch ingest coordination (propagated per-company)
     neo4j_expected_total: int
     neo4j_batch_token: str

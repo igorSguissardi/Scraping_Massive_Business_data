@@ -27,7 +27,7 @@ from utils.neo4j_ingest import ingest_companies_batch
 
 # Lazy-load LLM on first use to avoid initialization errors when API key is not set
 _enrichment_llm = None
-_MAX_COMPANIES = 100
+_MAX_COMPANIES = 10
 NEO4J_BATCH_SIZE = int(os.getenv("NEO4J_BATCH_SIZE", "10"))
 
 # Global concurrency controls
@@ -38,6 +38,11 @@ SCRAPE_CONCURRENCY = int(os.getenv("SCRAPE_CONCURRENCY", "5"))
 OPENAI_SEM = asyncio.Semaphore(OPENAI_CONCURRENCY)
 SEARCH_SEM = asyncio.Semaphore(SEARCH_CONCURRENCY)
 SCRAPE_SEM = asyncio.Semaphore(SCRAPE_CONCURRENCY)
+
+# LLM cost configuration (USD per 1M token)
+OPENAI_INPUT_COST_PER_1M = float(os.getenv("OPENAI_INPUT_COST_PER_1M", "0"))
+OPENAI_OUTPUT_COST_PER_1M = float(os.getenv("OPENAI_OUTPUT_COST_PER_1M", "0"))
+OPENAI_CACHED_INPUT_COST_PER_1M = float(os.getenv("OPENAI_CACHED_INPUT_COST_PER_1M", "0"))
 
 # Neo4j batch ingest coordination (cross-branch)
 _NEO4J_BATCH_LOCK = asyncio.Lock()
@@ -92,6 +97,66 @@ async def _run_llm(chain, payload: dict):
         return await asyncio.to_thread(chain.invoke, payload)
 
 
+def _extract_llm_usage(response) -> dict:
+    """
+    Extract token usage from a LangChain LLM response.
+    """
+    usage_meta = getattr(response, "usage_metadata", None) or {}
+    response_meta = getattr(response, "response_metadata", None) or {}
+    token_usage = response_meta.get("token_usage") or {}
+    if not usage_meta and not token_usage:
+        return {}
+
+    input_tokens = usage_meta.get("input_tokens") or token_usage.get("prompt_tokens") or token_usage.get("input_tokens") or 0
+    output_tokens = usage_meta.get("output_tokens") or token_usage.get("completion_tokens") or token_usage.get("output_tokens") or 0
+    total_tokens = usage_meta.get("total_tokens") or token_usage.get("total_tokens") or (input_tokens + output_tokens)
+    cached_input_tokens = (
+        usage_meta.get("input_tokens_cached")
+        or token_usage.get("prompt_tokens_cached")
+        or token_usage.get("cached_input_tokens")
+        or 0
+    )
+
+    return {
+        "input_tokens": int(input_tokens or 0),
+        "output_tokens": int(output_tokens or 0),
+        "total_tokens": int(total_tokens or 0),
+        "cached_input_tokens": int(cached_input_tokens or 0),
+    }
+
+
+def _calculate_llm_cost(usage: dict) -> float:
+    """
+    Calculate USD cost for a request based on token usage and env-configured rates.
+    """
+    input_tokens = int(usage.get("input_tokens", 0) or 0)
+    output_tokens = int(usage.get("output_tokens", 0) or 0)
+    cached_input_tokens = int(usage.get("cached_input_tokens", 0) or 0)
+    billable_input = max(input_tokens - cached_input_tokens, 0)
+
+    input_cost = billable_input * (OPENAI_INPUT_COST_PER_1M / 1_000_000)
+    cached_cost = cached_input_tokens * (OPENAI_CACHED_INPUT_COST_PER_1M / 1_000_000)
+    output_cost = output_tokens * (OPENAI_OUTPUT_COST_PER_1M / 1_000_000)
+    return float(input_cost + cached_cost + output_cost)
+
+
+def _format_llm_usage_line(request_index: int, usage: dict, cost_usd: float) -> str:
+    """
+    Format a per-request usage line for logs.
+    """
+    if not usage:
+        return f"[LLM COST] Request #{request_index}: usage unavailable"
+    cached = int(usage.get("cached_input_tokens", 0) or 0)
+    cached_part = f", cached_input_tokens={cached}" if cached else ""
+    return (
+        f"[LLM COST] Request #{request_index}: "
+        f"input_tokens={usage.get('input_tokens', 0)}, "
+        f"output_tokens={usage.get('output_tokens', 0)}, "
+        f"total_tokens={usage.get('total_tokens', 0)}"
+        f"{cached_part}, cost_usd={cost_usd:.6f}"
+    )
+
+
 async def enrichment_company_node(state: dict):
     """
     Run enrichment for a single company by reusing the batch enrichment node.
@@ -110,11 +175,19 @@ async def enrichment_company_node(state: dict):
     enriched_company = enriched_companies[0] if enriched_companies else company
     corporate_csv_evidence = result.get("corporate_csv_evidence")
     llm_request_count = result.get("llm_request_count", 0)
+    llm_input_tokens = result.get("llm_input_tokens", 0)
+    llm_output_tokens = result.get("llm_output_tokens", 0)
+    llm_total_tokens = result.get("llm_total_tokens", 0)
+    llm_cost_usd = result.get("llm_cost_usd", 0.0)
     return {
         "company": enriched_company,
         "execution_logs": result.get("execution_logs", []),
         "corporate_csv_evidence": [corporate_csv_evidence],
         "llm_request_count": llm_request_count,
+        "llm_input_tokens": llm_input_tokens,
+        "llm_output_tokens": llm_output_tokens,
+        "llm_total_tokens": llm_total_tokens,
+        "llm_cost_usd": llm_cost_usd,
     }
 
 
@@ -140,6 +213,10 @@ async def institutional_company_node(state: dict):
     summary = None
     summary_logs = []
     llm_request_count = 0
+    llm_input_tokens = 0
+    llm_output_tokens = 0
+    llm_total_tokens = 0
+    llm_cost_usd = 0.0
     node_label = "institutional_summary"
     if markdown:
         try:
@@ -163,6 +240,19 @@ async def institutional_company_node(state: dict):
             )
             chain = prompt_template | enrichment_llm
             llm_response = await _run_llm(chain, {"markdown": markdown})
+            llm_usage = _extract_llm_usage(llm_response)
+            llm_cost = _calculate_llm_cost(llm_usage)
+            llm_input_tokens += llm_usage.get("input_tokens", 0)
+            llm_output_tokens += llm_usage.get("output_tokens", 0)
+            llm_total_tokens += llm_usage.get("total_tokens", 0)
+            llm_cost_usd += llm_cost
+            log_company_event(
+                company,
+                node_label,
+                _format_llm_usage_line(llm_request_count, llm_usage, llm_cost),
+                execution_logs=summary_logs,
+                also_print=True,
+            )
             summary_text = getattr(llm_response, "content", str(llm_response)).strip()
             if summary_text and summary_text.lower() != "null":
                 summary = summary_text
@@ -189,6 +279,14 @@ async def institutional_company_node(state: dict):
                 execution_logs=summary_logs,
                 also_print=True,
             )
+            if llm_request_count:
+                log_company_event(
+                    company,
+                    node_label,
+                    _format_llm_usage_line(llm_request_count, {}, 0.0),
+                    execution_logs=summary_logs,
+                    also_print=True,
+                )
     else:
         log_company_event(
             company,
@@ -207,6 +305,10 @@ async def institutional_company_node(state: dict):
         "institutional_summary": [summary],
         "execution_logs": result.get("execution_logs", []) + summary_logs,
         "llm_request_count": llm_request_count,
+        "llm_input_tokens": llm_input_tokens,
+        "llm_output_tokens": llm_output_tokens,
+        "llm_total_tokens": llm_total_tokens,
+        "llm_cost_usd": llm_cost_usd,
     }
 
 
@@ -417,6 +519,10 @@ async def enrichment_node(state: GraphState):
     processed_count = 0
     enrichment_logs = []
     llm_request_count = 0  # Track number of LLM API calls
+    llm_input_tokens = 0
+    llm_output_tokens = 0
+    llm_total_tokens = 0
+    llm_cost_usd = 0.0
 
     for index, company in enumerate(source_companies):
         company_copy = dict(company)
@@ -618,6 +724,19 @@ async def enrichment_node(state: GraphState):
             ])
             chain = prompt_template_phase1 | enrichment_llm
             llm_response = await _run_llm(chain, {"user_input": llm_prompt})
+            llm_usage = _extract_llm_usage(llm_response)
+            llm_cost = _calculate_llm_cost(llm_usage)
+            llm_input_tokens += llm_usage.get("input_tokens", 0)
+            llm_output_tokens += llm_usage.get("output_tokens", 0)
+            llm_total_tokens += llm_usage.get("total_tokens", 0)
+            llm_cost_usd += llm_cost
+            log_company_event(
+                company_copy,
+                node_label,
+                _format_llm_usage_line(llm_request_count, llm_usage, llm_cost),
+                execution_logs=enrichment_logs,
+                also_print=True,
+            )
             analysis_text = getattr(llm_response, "content", str(llm_response))
             # Validate that we received a non-empty response
             if not analysis_text or not analysis_text.strip():
@@ -670,6 +789,14 @@ async def enrichment_node(state: GraphState):
                 execution_logs=enrichment_logs,
                 also_print=True,
             )
+            if llm_request_count:
+                log_company_event(
+                    company_copy,
+                    node_label,
+                    _format_llm_usage_line(llm_request_count, {}, 0.0),
+                    execution_logs=enrichment_logs,
+                    also_print=True,
+                )
             parsed_output = {}
             log_company_event(
                 company_copy,
@@ -1128,6 +1255,10 @@ async def enrichment_node(state: GraphState):
         "execution_logs": [log_message, llm_summary, deep_search_note] + enrichment_logs,
         "corporate_csv_evidence": corporate_csv_evidence,
         "llm_request_count": llm_request_count,
+        "llm_input_tokens": llm_input_tokens,
+        "llm_output_tokens": llm_output_tokens,
+        "llm_total_tokens": llm_total_tokens,
+        "llm_cost_usd": llm_cost_usd,
     }
 
 
